@@ -1,0 +1,215 @@
+import { Favicon } from "@/components/layout/Favicon";
+import { formatRelativeTime } from "@/lib/format";
+import { checkMonitorNow } from "@/lib/monitors/client";
+import { getFailureStateInfo } from "@/lib/monitors/diagnostics";
+import type { Monitor } from "@/lib/monitors/types";
+import { cn } from "@/lib/utils";
+import {
+  AlertCircle,
+  FileQuestion,
+  RefreshCw,
+  ShieldAlert,
+  Trash2,
+  WifiOff,
+} from "lucide-react";
+import { memo, useCallback, useState } from "react";
+import { DeleteMonitorDialog } from "./DeleteMonitorDialog";
+
+interface MonitorCardProps {
+  monitor: Monitor;
+  onDelete: (id: string) => void;
+  onOpen: (id: string) => void;
+}
+
+const REMOVE_TRANSITION_MS = 160;
+
+/**
+ * A single bento tile on the panel's home screen: the value front
+ * and center, the site's favicon + monitor name + last-updated time
+ * below it, nothing else - no URL, no controls - so the grid reads as
+ * data at a glance. Delete is still reachable, tucked behind a hover
+ * reveal in the corner rather than competing with the value for
+ * attention; everything else (interval, strategy, diagnostics) lives
+ * one click away in the detail view opened by clicking the tile -
+ * shown inline in the panel itself, never a new tab.
+ */
+export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen }: MonitorCardProps) {
+  const [isRemoving, setIsRemoving] = useState(false);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const isError = monitor.lastStatus === "error";
+  const failureInfo = isError
+    ? getFailureStateInfo(monitor.lastDiagnosticCode, monitor.lastError)
+    : null;
+  const isChecking = monitor.lastStatus === "checking";
+  const hasValue = monitor.lastValue !== null;
+
+  const handleConfirmDelete = useCallback(() => {
+    // Fade/scale out first, then remove from the underlying list once
+    // the transition finishes - a plain CSS transition + timeout
+    // stands in for what framer-motion's exit animation used to do,
+    // at a fraction of the size.
+    setIsRemoving(true);
+    window.setTimeout(() => onDelete(monitor.id), REMOVE_TRANSITION_MS);
+  }, [onDelete, monitor.id]);
+
+  const handleCardClick = useCallback(() => {
+    onOpen(monitor.id);
+  }, [onOpen, monitor.id]);
+
+  async function handleRetry(e: React.MouseEvent) {
+    e.stopPropagation();
+    setIsRetrying(true);
+    try {
+      await checkMonitorNow(monitor.id);
+    } finally {
+      setIsRetrying(false);
+    }
+  }
+
+  const failureIcon =
+    failureInfo?.reason === "blocked" ? (
+      <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
+    ) : failureInfo?.reason === "page_load_failed" ? (
+      <WifiOff className="h-3.5 w-3.5 shrink-0" />
+    ) : failureInfo?.reason === "page_changed" ? (
+      <FileQuestion className="h-3.5 w-3.5 shrink-0" />
+    ) : (
+      <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+    );
+
+  return (
+    <div
+      className={cn(
+        "group relative overflow-hidden rounded-lg bg-muted/50 transition-all duration-150 ease-out hover:bg-accent active:scale-[0.985]",
+        isRemoving && "pointer-events-none scale-95 opacity-0",
+      )}
+    >
+      <button
+        onClick={handleCardClick}
+        className="flex w-full flex-col items-start gap-2 p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      >
+        <div className="w-full min-w-0 pr-4">
+          {hasValue ? (
+            <div className="flex items-center gap-1.5 min-w-0">
+              <p
+                title={monitor.lastValue ?? undefined}
+                className={cn(
+                  "truncate text-[20px] font-semibold leading-[1.15] tracking-[-0.01em] tabular-nums",
+                  isError ? "text-muted-foreground" : "text-foreground",
+                  (isChecking || isRetrying) && "animate-pulse",
+                )}
+              >
+                {monitor.lastValue}
+              </p>
+              {isError && (
+                <span
+                  title={failureInfo?.description ?? "Check failed"}
+                  className="inline-flex shrink-0 items-center text-destructive"
+                >
+                  {failureIcon}
+                </span>
+              )}
+            </div>
+          ) : isError ? (
+            <div className="flex items-center gap-1.5 text-muted-foreground">
+              {failureIcon}
+              <span
+                title={failureInfo?.description}
+                className="truncate text-[13px] font-medium"
+              >
+                {failureInfo?.label}
+              </span>
+            </div>
+          ) : (
+            <p className="truncate text-[20px] font-semibold leading-[1.15] tracking-[-0.01em] tabular-nums text-muted-foreground/50">
+              {isChecking || isRetrying ? "···" : "—"}
+            </p>
+          )}
+        </div>
+
+        <div className="flex w-full min-w-0 flex-col gap-0.5">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <Favicon url={monitor.url} size={12} />
+            {/* `min-w-0` here too, not just on this row's own container:
+                as a flex child, this span's default automatic min-width
+                is its content's min-content size - which for nowrap+truncate
+                text is the full, un-ellipsized title width. Without
+                overriding it, a long monitor name pushes this row (and
+                the card around it) wider than its column, the same
+                overflow the grid-item comment above describes for the
+                value text. */}
+            <span
+              title={monitor.name}
+              className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-muted-foreground"
+            >
+              {monitor.name}
+            </span>
+          </div>
+          <span
+            className={cn(
+              "text-[10px]",
+              isError ? "text-destructive" : "text-muted-foreground/60",
+            )}
+          >
+            {isChecking || isRetrying
+              ? "Checking…"
+              : isError
+                ? `${failureInfo?.label ?? "Check failed"}${hasValue ? " (stale)" : ""}`
+                : monitor.lastCheckedAt
+                  ? `Updated ${formatRelativeTime(monitor.lastCheckedAt)}`
+                  : "Not checked yet"}
+          </span>
+        </div>
+      </button>
+
+      {/* "Something changed" indicator - replaced by the delete button
+          on hover so the corner never shows both at once. */}
+      {monitor.lastStatus === "changed" && (
+        <span
+          aria-hidden
+          className="absolute right-2.5 top-2.5 h-1.5 w-1.5 rounded-full bg-foreground ring-2 ring-muted/50 transition-opacity group-hover:opacity-0"
+        />
+      )}
+
+      <div
+        className={cn(
+          "absolute right-1 top-1 flex items-center gap-0.5 transition-opacity duration-150",
+          isError
+            ? "opacity-100"
+            : "opacity-0 focus-within:opacity-100 group-hover:opacity-100",
+        )}
+      >
+        {isError && failureInfo?.canRetry && (
+          <button
+            type="button"
+            aria-label={`Check ${monitor.name} now`}
+            title="Check now"
+            onClick={handleRetry}
+            disabled={isChecking || isRetrying}
+            className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <RefreshCw
+              className={cn(
+                "h-3 w-3",
+                (isChecking || isRetrying) && "animate-spin",
+              )}
+            />
+          </button>
+        )}
+        <DeleteMonitorDialog
+          monitorName={monitor.name}
+          onConfirm={handleConfirmDelete}
+          trigger={
+            <button
+              type="button"
+              aria-label={`Delete ${monitor.name}`}
+              className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <Trash2 className="h-3 w-3" />
+            </button>
+          }
+        />
+      </div>
+    </div>
+  );
+});

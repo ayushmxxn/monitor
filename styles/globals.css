@@ -1,0 +1,248 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * Design tokens.
+ *
+ * The interface is intentionally restricted to white, gray, and black
+ * (favicons are the one place real color appears, since they're brand
+ * marks rather than UI chrome). The selected theme is applied by the
+ * extension itself; every color below is a
+ * pure grayscale HSL value (0% saturation), with one deliberate
+ * exception: `--destructive` carries real hue so irreversible actions
+ * (deleting a monitor and its history) read unambiguously as
+ * dangerous, not just as another gray button.
+ */
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 9%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 9%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 9%;
+
+    --primary: 0 0% 9%;
+    --primary-foreground: 0 0% 98%;
+
+    --secondary: 0 0% 96%;
+    --secondary-foreground: 0 0% 9%;
+
+    --muted: 0 0% 96%;
+    --muted-foreground: 0 0% 45%;
+
+    --accent: 0 0% 94%;
+    --accent-foreground: 0 0% 9%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 0 0% 89%;
+    --input: 0 0% 89%;
+    --ring: 0 0% 9%;
+
+    --radius: 0.625rem;
+  }
+
+  /* A calm graphite palette rather than pure black. It keeps surfaces
+     * distinct, gives borders enough contrast, and avoids the harsh
+     * "lights-off" look common in low-quality dark themes. */
+  .dark {
+    --background: 220 9% 13%;
+    --foreground: 210 20% 94%;
+    --card: 220 9% 15%;
+    --card-foreground: 210 20% 94%;
+    --popover: 220 9% 17%;
+    --popover-foreground: 210 20% 94%;
+    --primary: 210 20% 94%;
+    --primary-foreground: 220 9% 13%;
+    --secondary: 220 8% 21%;
+    --secondary-foreground: 210 20% 94%;
+    --muted: 220 8% 19%;
+    --muted-foreground: 215 12% 67%;
+    --accent: 220 8% 25%;
+    --accent-foreground: 210 20% 96%;
+    --destructive: 0 67% 58%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 8% 27%;
+    --input: 220 8% 29%;
+    --ring: 210 20% 86%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  *,
+  *::before,
+  *::after {
+    /* A single global default so every hover/press/focus transition
+       in the app (buttons, cards, switches, the panel itself) settles
+       with the same soft, slightly-decelerated feel instead of each
+       component picking its own easing - this is most of what reads
+       as "polished" rather than "default browser". Individual
+       properties/durations are still set per-element where it
+       matters (e.g. the panel's open/close slide). */
+    transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  html,
+  body {
+    @apply h-full;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings:
+      'rlig' 1,
+      'calt' 1;
+  }
+
+  ::selection {
+    @apply bg-foreground/10;
+  }
+
+  /* Slim, unobtrusive scrollbars that fit the minimal aesthetic. */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-border;
+    border-radius: 9999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-muted-foreground/40;
+  }
+}
+
+/**
+ * Small, purpose-built animations that replace what framer-motion used
+ * to do (list-item enter, empty-state fade, loading shimmer). Plain
+ * CSS keeps these effectively free - no runtime animation library, no
+ * JS-driven layout measurement, just the browser's own compositor.
+ */
+@layer utilities {
+  @keyframes enter-up {
+    from {
+      opacity: 0;
+      transform: translateY(6px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  .animate-enter-up {
+    animation: enter-up 0.32s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  }
+
+  @keyframes dialog-scale-in {
+    from {
+      opacity: 0;
+      transform: translate(-50%, -50%) scale(0.96);
+    }
+    to {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1);
+    }
+  }
+
+  .animate-dialog-scale-in {
+    animation: dialog-scale-in 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  @keyframes shimmer {
+    from {
+      background-position: 150% 0;
+    }
+    to {
+      background-position: -50% 0;
+    }
+  }
+
+  .skeleton-shimmer {
+    background-image: linear-gradient(
+      100deg,
+      hsl(var(--muted)) 40%,
+      hsl(var(--accent)) 50%,
+      hsl(var(--muted)) 60%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.8s ease-in-out infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .animate-enter-up,
+    .skeleton-shimmer,
+    .animate-dialog-scale-in {
+      animation: none;
+    }
+  }
+
+  /* History chart - line draws in and the area/labels fade up
+     together. Re-triggered on range change by remounting with a
+     fresh `key`, so switching 24h/7d/30d/All redraws rather than
+     just swapping. */
+  @keyframes chart-line-draw {
+    from {
+      stroke-dashoffset: 1;
+    }
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+
+  .animate-chart-line {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+    animation: chart-line-draw 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  }
+
+  @keyframes chart-fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(3px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-chart-fade {
+    animation: chart-fade-up 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  }
+
+  @keyframes chart-area-fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  .animate-chart-area {
+    animation: chart-area-fade 0.6s cubic-bezier(0.22, 1, 0.36, 1) 0.1s backwards;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .animate-chart-line,
+    .animate-chart-fade,
+    .animate-chart-area {
+      animation: none;
+      stroke-dashoffset: 0;
+    }
+  }
+}
