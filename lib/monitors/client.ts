@@ -15,31 +15,81 @@ const CHECK_NOW_TIMEOUT_MS = 35_000;
  */
 const CHECK_ALL_TIMEOUT_MS = 180_000;
 
-/** Asks the background worker to check one monitor right now, outside its schedule. */
-export async function checkMonitorNow(monitorId: string): Promise<Result<void>> {
-  const result = await tryCatch(
-    () => withTimeout(sendMessage('checkMonitorNow', monitorId), CHECK_NOW_TIMEOUT_MS),
-    'MESSAGING_FAILED',
-  );
-  if (!result.ok) return result;
-  if (!result.value.ok) {
-    return {
-      ok: false,
-      error: new AppError({
-        code: 'UNKNOWN',
-        message: result.value.error ?? 'The check failed.',
-      }),
-    };
+const inFlightChecks = new Map<string, Promise<Result<void>>>();
+const checkingListeners = new Set<() => void>();
+
+function notifyCheckingListeners(): void {
+  for (const listener of checkingListeners) {
+    listener();
   }
-  return { ok: true, value: undefined };
 }
 
+export function isMonitorChecking(monitorId: string): boolean {
+  return inFlightChecks.has(monitorId);
+}
+
+export function subscribeChecking(listener: () => void): () => void {
+  checkingListeners.add(listener);
+  return () => {
+    checkingListeners.delete(listener);
+  };
+}
+
+/** Asks the background worker to check one monitor right now, outside its schedule. */
+export function checkMonitorNow(monitorId: string): Promise<Result<void>> {
+  const existing = inFlightChecks.get(monitorId);
+  if (existing) {
+    return existing;
+  }
+
+  const promise: Promise<Result<void>> = (async (): Promise<Result<void>> => {
+    try {
+      const result = await tryCatch(
+        () => withTimeout(sendMessage('checkMonitorNow', monitorId), CHECK_NOW_TIMEOUT_MS),
+        'MESSAGING_FAILED',
+      );
+      if (!result.ok) return result;
+      if (!result.value.ok) {
+        return {
+          ok: false,
+          error: new AppError({
+            code: 'UNKNOWN',
+            message: result.value.error ?? 'The check failed.',
+          }),
+        };
+      }
+      return { ok: true, value: undefined };
+    } finally {
+      inFlightChecks.delete(monitorId);
+      notifyCheckingListeners();
+    }
+  })();
+
+  inFlightChecks.set(monitorId, promise);
+  notifyCheckingListeners();
+  return promise;
+}
+
+let checkAllInFlight: Promise<Result<void>> | null = null;
+
 /** Asks the background worker to check every enabled monitor right now, outside their individual schedules. */
-export async function checkAllMonitorsNow(): Promise<Result<void>> {
-  const result = await tryCatch(
-    () => withTimeout(sendMessage('checkAllMonitorsNow', undefined), CHECK_ALL_TIMEOUT_MS),
-    'MESSAGING_FAILED',
-  );
-  if (!result.ok) return result;
-  return { ok: true, value: undefined };
+export function checkAllMonitorsNow(): Promise<Result<void>> {
+  if (checkAllInFlight) {
+    return checkAllInFlight;
+  }
+
+  checkAllInFlight = (async (): Promise<Result<void>> => {
+    try {
+      const result = await tryCatch(
+        () => withTimeout(sendMessage('checkAllMonitorsNow', undefined), CHECK_ALL_TIMEOUT_MS),
+        'MESSAGING_FAILED',
+      );
+      if (!result.ok) return result;
+      return { ok: true, value: undefined };
+    } finally {
+      checkAllInFlight = null;
+    }
+  })();
+
+  return checkAllInFlight;
 }

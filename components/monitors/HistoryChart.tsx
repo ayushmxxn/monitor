@@ -9,13 +9,12 @@ interface HistoryChartProps {
   history: MonitorCheck[];
 }
 
-type RangeKey = '24h' | '7d' | '30d' | 'all';
+type RangeKey = '24h' | '7d' | '30d';
 
-const RANGE_OPTIONS: { key: RangeKey; label: string; ms: number | null }[] = [
+const RANGE_OPTIONS: { key: RangeKey; label: string; ms: number }[] = [
   { key: '24h', label: '24H', ms: 24 * 60 * 60 * 1000 },
   { key: '7d', label: '7D', ms: 7 * 24 * 60 * 60 * 1000 },
   { key: '30d', label: '30D', ms: 30 * 24 * 60 * 60 * 1000 },
-  { key: 'all', label: 'All', ms: null },
 ];
 
 /** Below this many usable points a line reads as noise, not a trend - show the empty state instead. */
@@ -90,15 +89,14 @@ function formatTick(timestamp: number, range: RangeKey): string {
 
 type NumericCheck = MonitorCheck & { semanticValue: NonNullable<MonitorCheck['semanticValue']> };
 
-/** Picks the narrowest range that still has at least two points to plot, so the chart opens showing a real trend rather than a flat "All". */
+/** Picks the narrowest range that still has at least two points to plot, defaulting to '30d' if sparse. */
 function pickDefaultRange(points: NumericCheck[]): RangeKey {
   const now = Date.now();
   for (const opt of RANGE_OPTIONS) {
-    if (opt.ms === null) continue;
-    const count = points.filter((p) => now - p.checkedAt <= opt.ms!).length;
+    const count = points.filter((p) => now - p.checkedAt <= opt.ms).length;
     if (count >= 2) return opt.key;
   }
-  return 'all';
+  return '30d';
 }
 
 export const HistoryChart = memo(function HistoryChart({ history }: HistoryChartProps) {
@@ -151,8 +149,7 @@ export const HistoryChart = memo(function HistoryChart({ history }: HistoryChart
   const [range, setRange] = useState<RangeKey>(() => pickDefaultRange(allPoints));
 
   const filtered = useMemo(() => {
-    const opt = RANGE_OPTIONS.find((o) => o.key === range)!;
-    if (opt.ms === null) return allPoints;
+    const opt = RANGE_OPTIONS.find((o) => o.key === range) ?? RANGE_OPTIONS[0];
     const cutoff = Date.now() - opt.ms;
     return allPoints.filter((entry) => entry.checkedAt >= cutoff);
   }, [allPoints, range]);

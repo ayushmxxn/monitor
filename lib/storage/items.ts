@@ -59,19 +59,19 @@ function safeDefineItem<T>(
         }
       },
       getValue: async () => {
-        try {
-          const res = await item.getValue();
-          return (res ?? fallback) as T;
-        } catch {
-          return fallback;
-        }
+        // A failed read must never masquerade as fallback data: callers
+        // (createMonitor/updateMonitor/scheduler) treat the result as
+        // truth, so returning `[]` here would let the next write silently
+        // destroy real data. Failures propagate to the existing
+        // Result/error handling instead.
+        const res = await item.getValue();
+        return (res ?? fallback) as T;
       },
       setValue: async (val: T) => {
-        try {
-          await item.setValue(val);
-        } catch {
-          // Ignore context invalidation
-        }
+        // A failed write must reach the caller's Result/error handling
+        // (store.ts relies on the throw for STORAGE_WRITE_FAILED) rather
+        // than reporting success while dropping the write.
+        await item.setValue(val);
       },
     } as WxtStorageItem<T, Record<string, unknown>>;
   } catch {
@@ -90,9 +90,11 @@ function safeDefineItem<T>(
  */
 export const settingsItem = safeDefineItem<AppSettings>(STORAGE_KEYS.settings, {
   fallback: DEFAULT_SETTINGS,
-  version: 2,
+  version: 4,
   migrations: {
     2: (stored: unknown) => ({ ...DEFAULT_SETTINGS, ...(stored as Partial<AppSettings>) }),
+    3: (stored: unknown) => ({ ...DEFAULT_SETTINGS, ...(stored as Partial<AppSettings>) }),
+    4: (stored: unknown) => ({ ...DEFAULT_SETTINGS, ...(stored as Partial<AppSettings>) }),
   },
 });
 

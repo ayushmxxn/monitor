@@ -1,6 +1,7 @@
 import { Favicon } from "@/components/layout/Favicon";
 import { formatRelativeTime } from "@/lib/format";
 import { checkMonitorNow } from "@/lib/monitors/client";
+import { useIsChecking } from "@/hooks/useIsChecking";
 import { getFailureStateInfo } from "@/lib/monitors/diagnostics";
 import type { Monitor } from "@/lib/monitors/types";
 import { cn } from "@/lib/utils";
@@ -36,12 +37,18 @@ const REMOVE_TRANSITION_MS = 160;
 export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen }: MonitorCardProps) {
   const [isRemoving, setIsRemoving] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
   const isError = monitor.lastStatus === "error";
   const failureInfo = isError
     ? getFailureStateInfo(monitor.lastDiagnosticCode, monitor.lastError)
     : null;
-  const isChecking = monitor.lastStatus === "checking";
+  const isCheckingInFlight = useIsChecking(monitor.id);
+  const isChecking = isCheckingInFlight || monitor.lastStatus === "checking";
   const hasValue = monitor.lastValue !== null;
+  // Temporary check failures preserve the last good value and status, so
+  // without this the timestamp below reads as a fresh successful read.
+  // Derived purely from persisted state: clears itself on recovery.
+  const isStaleRetrying = !isError && monitor.consecutiveFailures > 0;
 
   const handleConfirmDelete = useCallback(() => {
     // Fade/scale out first, then remove from the underlying list once
@@ -59,8 +66,12 @@ export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen
   async function handleRetry(e: React.MouseEvent) {
     e.stopPropagation();
     setIsRetrying(true);
+    setRetryError(null);
     try {
-      await checkMonitorNow(monitor.id);
+      const result = await checkMonitorNow(monitor.id);
+      if (!result.ok) {
+        setRetryError(result.error.toDisplayMessage());
+      }
     } finally {
       setIsRetrying(false);
     }
@@ -156,9 +167,16 @@ export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen
               : isError
                 ? `${failureInfo?.label ?? "Check failed"}${hasValue ? " (stale)" : ""}`
                 : monitor.lastCheckedAt
-                  ? `Updated ${formatRelativeTime(monitor.lastCheckedAt)}`
+                  ? isStaleRetrying
+                    ? `Updated ${formatRelativeTime(monitor.lastCheckedAt)} · retrying`
+                    : `Updated ${formatRelativeTime(monitor.lastCheckedAt)}`
                   : "Not checked yet"}
           </span>
+          {retryError && (
+            <span role="alert" className="truncate text-[10px] text-destructive">
+              {retryError}
+            </span>
+          )}
         </div>
       </button>
 
@@ -179,7 +197,7 @@ export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen
             : "opacity-0 focus-within:opacity-100 group-hover:opacity-100",
         )}
       >
-        {isError && failureInfo?.canRetry && (
+        {isError && failureInfo?.canRetry && monitor.enabled && (
           <button
             type="button"
             aria-label={`Check ${monitor.name} now`}

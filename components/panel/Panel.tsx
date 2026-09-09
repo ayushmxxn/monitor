@@ -318,7 +318,7 @@ function PanelContent({
     [onOpen],
   );
   const picker = useElementPicker(handlePickerFinished);
-  const pageAccess = usePageAccess();
+  const { state: pageAccess, retry: retryPageAccess } = usePageAccess();
   const [view, setView] = useState<PanelView>('monitors');
   const [selectedMonitorId, setSelectedMonitorId] = useState<string | null>(null);
   const [selectedSource, setSelectedSource] = useState<string>('all');
@@ -584,8 +584,20 @@ function PanelContent({
             <>
               {pageAccess === 'denied' && (
                 <InlineNotice tone="info">
-                  Monitor doesn't have access to this site yet. Click the toolbar icon again
-                  to grant it, then try Add.
+                  Monitor doesn't have access to this site yet. Close the panel and click the toolbar
+                  icon to grant it, then try Add.
+                </InlineNotice>
+              )}
+              {pageAccess === 'error' && (
+                <InlineNotice
+                  tone="error"
+                  action={
+                    <Button size="sm" variant="outline" className="h-7 text-xs" onClick={retryPageAccess}>
+                      Retry
+                    </Button>
+                  }
+                >
+                  Couldn't confirm access to this site — the background worker may still be starting.
                 </InlineNotice>
               )}
               {picker.state === 'waiting' && (

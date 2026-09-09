@@ -1,6 +1,8 @@
 import { Button } from '@/components/ui/button';
 import { SettingRow, SettingSelectRow, SettingLinkRow, SettingActionRow } from '@/components/settings/SettingRow';
 import { SettingsSection } from '@/components/settings/SettingsSection';
+import { WebhookSettings } from '@/components/settings/WebhookSettings';
+import { DiscordSettings } from '@/components/settings/DiscordSettings';
 import { ClearAllMonitorsDialog } from '@/components/settings/ClearAllMonitorsDialog';
 import { useStorage } from '@/hooks/useStorage';
 import { settingsItem, monitorsItem } from '@/lib/storage/items';
@@ -58,6 +60,20 @@ export function PanelSettings() {
           onValueChange={(theme) => setSettings({ ...settings, theme })}
         />
       </SettingsSection>
+
+      <WebhookSettings
+        settings={settings}
+        onChange={setSettings}
+        disabled={isSettingsLoading}
+        idPrefix="panel"
+      />
+
+      <DiscordSettings
+        settings={settings}
+        onChange={setSettings}
+        disabled={isSettingsLoading}
+        idPrefix="panel"
+      />
 
       <SettingsSection title="Data">
         <SettingActionRow

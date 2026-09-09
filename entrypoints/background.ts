@@ -9,7 +9,7 @@ import {
   runDueMonitors,
   checkAllMonitorsNow,
 } from '@/lib/monitors/scheduler';
-import { checkMonitor } from '@/lib/monitors/checker';
+import { checkMonitor, checkMonitorById } from '@/lib/monitors/checker';
 import { getMonitor } from '@/lib/monitors/store';
 import { runPickerFlow } from '@/lib/monitors/pickerFlow';
 
@@ -50,12 +50,12 @@ function registerMessageHandlers(): void {
   });
 
   onMessage('checkMonitorNow', async ({ data: monitorId }) => {
-    const result = await getMonitor(monitorId);
-    if (!result.ok) {
-      return { ok: false, error: result.error.toDisplayMessage() };
+    try {
+      await checkMonitorById(monitorId);
+      return { ok: true, error: null };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'The check failed.' };
     }
-    await checkMonitor(result.value);
-    return { ok: true, error: null };
   });
 
   onMessage('checkAllMonitorsNow', async () => {

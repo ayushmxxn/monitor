@@ -16,7 +16,7 @@ import {
   REPROBE_AFTER_LOW_CONFIDENCE_STREAK,
   PERIODIC_REPROBE_INTERVAL_CHECKS,
 } from './types';
-import type { Monitor, MonitorCheckStrategy } from './types';
+import type { HistoricalStats, Monitor, MonitorCheckStrategy } from './types';
 import { normalizeText } from './fingerprint';
 import type { SemanticValue } from './semanticValue';
 import { shouldTriggerAlert } from './alertCondition';
@@ -53,6 +53,20 @@ export function checkMonitor(monitor: Monitor): Promise<void> {
 }
 
 /**
+ * Checks a monitor by ID, joining any already-running check for the same monitor ID
+ * rather than issuing redundant storage reads or duplicate requests.
+ */
+export function checkMonitorById(monitorId: string): Promise<void> {
+  return dedupeInFlight(inFlightChecks, monitorId, async () => {
+    const result = await getMonitor(monitorId);
+    if (!result.ok) {
+      throw new Error(result.error.toDisplayMessage());
+    }
+    return runCheck(result.value);
+  });
+}
+
+/**
  * Strategy selection: try the monitor's persisted strategy first (the
  * one that worked last time, so a known-good site never pays for a
  * redundant fetch attempt before falling back to a live tab). If that
@@ -70,18 +84,23 @@ export function checkMonitor(monitor: Monitor): Promise<void> {
  * wrong — the same discipline a careful human maintainer would apply
  * rather than assuming yesterday's answer still holds.
  */
-async function runCheck(initialMonitor: Monitor): Promise<void> {
-  const latestResult = await getMonitor(initialMonitor.id);
-  const monitor = latestResult.ok ? latestResult.value : initialMonitor;
+/** Exported for focused permission-branch tests (same as `recordSuccess` below). */
+export async function runCheck(monitor: Monitor): Promise<void> {
   if (!monitor.enabled) {
     return;
   }
 
-  await updateMonitor(monitor.id, { lastStatus: 'checking' });
-
   const permission = await hasOriginPermission(monitor.url);
-  if (!permission.ok || !permission.value) {
+  if (permission.ok && !permission.value) {
     await recordFailure(monitor, [diagnostic('PERMISSION_DENIED')], null);
+    return;
+  }
+  if (!permission.ok) {
+    // A failed permission *check* is not a denial: the API errored, so
+    // nothing is known about access. Recording UNKNOWN keeps the
+    // failure temporary and retryable (with a working Retry button)
+    // instead of misdirecting the user to re-grant access.
+    await recordFailure(monitor, [diagnostic('UNKNOWN', permission.error.message)], null);
     return;
   }
 
@@ -168,23 +187,69 @@ export function hasValueChanged(
   return normalizeText(prevValue) !== normalizeText(nextValue);
 }
 
-async function recordSuccess(
+/** Exported for focused commit-guard tests (same as `hasValueChanged` below). */
+export async function recordSuccess(
   monitor: Monitor,
   strategyId: MonitorCheckStrategy,
   outcome: StrategyOutcome,
 ): Promise<void> {
   const value = outcome.value!;
-  const changed = hasValueChanged(monitor.lastValue, monitor.lastSemanticValue, value, outcome.semanticValue);
   const now = Date.now();
   const wasRelocated = outcome.updatedFingerprint !== null;
 
-  await updateMonitor(monitor.id, {
+  // Commit against the CURRENT stored monitor, not the snapshot from
+  // when this (potentially 20-30s) check started: the user may have
+  // renamed, disabled, or deleted the monitor meanwhile. A missing or
+  // disabled monitor drops the result entirely - no state, no history,
+  // no alert. A failed re-read is equally a no-commit: without
+  // verified-current state there is nothing safe to merge into.
+  const currentResult = await getMonitor(monitor.id);
+  if (!currentResult.ok || !currentResult.value.enabled) {
+    return;
+  }
+  const current = currentResult.value;
+
+  const changed = hasValueChanged(current.lastValue, current.lastSemanticValue, value, outcome.semanticValue);
+
+  let nextStats: HistoricalStats | null = current.stats ?? null;
+  if (
+    outcome.semanticValue &&
+    outcome.semanticValue.type !== 'text' &&
+    outcome.semanticValue.normalized !== null &&
+    Number.isFinite(outcome.semanticValue.normalized)
+  ) {
+    const num = outcome.semanticValue.normalized;
+    const prev = current.stats;
+    nextStats = prev
+      ? {
+          low: Math.min(prev.low, num),
+          lowDate: num <= prev.low ? now : prev.lowDate,
+          high: Math.max(prev.high, num),
+          sum: prev.sum + num,
+          count: prev.count + 1,
+        }
+      : {
+          low: num,
+          lowDate: now,
+          high: num,
+          sum: num,
+          count: 1,
+        };
+  }
+
+  const previousValue = current.lastValue;
+  const previousSemantic = current.lastSemanticValue;
+
+  // History and alerts follow a successful monitor update only: if the
+  // monitor vanished (or the write failed) in the gap above, neither
+  // may resurrect state nor notify for a monitor that is gone.
+  const updateResult = await updateMonitor(monitor.id, {
     checkStrategy: strategyId,
     consecutiveFailures: 0,
     consecutiveRelocations: wasRelocated && outcome.confidence < RECOVERY_ACCEPT_THRESHOLD + 20
-      ? monitor.consecutiveRelocations + 1
+      ? current.consecutiveRelocations + 1
       : 0,
-    totalSuccessfulChecks: monitor.totalSuccessfulChecks + 1,
+    totalSuccessfulChecks: current.totalSuccessfulChecks + 1,
     lastCheckedAt: now,
     lastValue: value,
     lastSemanticValue: outcome.semanticValue,
@@ -192,12 +257,13 @@ async function recordSuccess(
     lastError: null,
     lastDiagnosticCode: outcome.diagnostic.code,
     lastConfidence: outcome.confidence,
-    fingerprint: outcome.updatedFingerprint ?? monitor.fingerprint,
-    lastFingerprintUpdateAt: wasRelocated ? now : monitor.lastFingerprintUpdateAt,
+    fingerprint: outcome.updatedFingerprint ?? current.fingerprint,
+    lastFingerprintUpdateAt: wasRelocated ? now : current.lastFingerprintUpdateAt,
+    stats: nextStats,
   });
-
-  const previousValue = monitor.lastValue;
-  const previousSemantic = monitor.lastSemanticValue;
+  if (!updateResult.ok) {
+    return;
+  }
 
   await appendHistory({
     id: `${monitor.id}_${now}`,
@@ -216,19 +282,20 @@ async function recordSuccess(
 
   if (changed) {
     const shouldAlert = shouldTriggerAlert(
-      monitor.alertCondition,
+      current.alertCondition,
       value,
       previousValue,
       outcome.semanticValue,
       previousSemantic,
     );
     if (shouldAlert) {
-      await notifyChange(monitor, value, previousValue, previousSemantic, outcome.semanticValue);
+      await notifyChange(current, value, previousValue, previousSemantic, outcome.semanticValue);
     }
   }
 }
 
-async function recordFailure(
+/** Exported for focused commit-guard tests (same as `recordSuccess` above). */
+export async function recordFailure(
   monitor: Monitor,
   diagnostics: ReturnType<typeof diagnostic>[],
   attemptedStrategy: MonitorCheckStrategy | null,
@@ -236,23 +303,31 @@ async function recordFailure(
   const now = Date.now();
   const primary = selectPrimaryDiagnostic(diagnostics);
   const message = diagnostics.map(formatDiagnostic).join(' — ');
+  // Same commit gate as recordSuccess above: re-fetch first, drop the
+  // result for a missing/disabled monitor, and only append history
+  // after a successful monitor update.
+  const currentResult = await getMonitor(monitor.id);
+  if (!currentResult.ok || !currentResult.value.enabled) {
+    return;
+  }
+  const current = currentResult.value;
   // A forced reprobe that still fails shouldn't strand the monitor with
   // no persisted strategy at all — fall back to whichever it was using
   // before so at least the fast path is tried first on the next tick.
-  const nextStrategy = attemptedStrategy ?? monitor.checkStrategy;
-  const consecutiveFailures = monitor.consecutiveFailures + 1;
-  const hasPriorValue = monitor.lastValue !== null;
+  const nextStrategy = attemptedStrategy ?? current.checkStrategy;
+  const consecutiveFailures = current.consecutiveFailures + 1;
+  const hasPriorValue = current.lastValue !== null;
   const isPermanent = isPermanentFailure(primary.code, consecutiveFailures, hasPriorValue);
 
   // Preserve the last known good status when a failure is temporary,
   // transitioning to 'error' only when the failure is genuinely permanent / unrecoverable.
   const nextStatus = isPermanent
     ? 'error'
-    : monitor.lastStatus === 'changed'
+    : current.lastStatus === 'changed'
       ? 'changed'
       : 'unchanged';
 
-  await updateMonitor(monitor.id, {
+  const updateResult = await updateMonitor(monitor.id, {
     consecutiveFailures,
     consecutiveRelocations: 0,
     lastCheckedAt: now,
@@ -261,6 +336,9 @@ async function recordFailure(
     lastDiagnosticCode: primary.code,
     checkStrategy: nextStrategy,
   });
+  if (!updateResult.ok) {
+    return;
+  }
 
   await appendHistory({
     id: `${monitor.id}_${now}`,

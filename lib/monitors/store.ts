@@ -2,8 +2,10 @@ import { tryCatch, AppError, type Result } from '@/lib/errors';
 import { monitorsItem, historyItem, settingsItem } from '@/lib/storage/items';
 import { serializeByKey } from './concurrency';
 import {
+  HISTORY_RETENTION_MS,
   MAX_HISTORY_ENTRIES,
   MIN_INTERVAL_MINUTES,
+  UNCHANGED_SAMPLE_INTERVAL_MS,
   type CreateMonitorInput,
   type Monitor,
   type MonitorCheck,
@@ -104,6 +106,7 @@ export function createMonitor(
       consecutiveRelocations: 0,
       totalSuccessfulChecks: 0,
       lastFingerprintUpdateAt: null,
+      stats: null,
     };
 
     const current = await monitorsItem.getValue();
@@ -178,15 +181,46 @@ export function getHistory(monitorId: string): Promise<Result<MonitorCheck[]>> {
   );
 }
 
-/** Appends a check result, trimming history to `MAX_HISTORY_ENTRIES` (newest first). */
+/**
+ * Appends a check result with 30-day retention and a hard safety ceiling.
+ * Unchanged checks are sampled periodically (preserving exact observation timestamps)
+ * while real events, changes, and error recoveries are always recorded.
+ */
 export function appendHistory(
   check: MonitorCheck,
 ): Promise<Result<MonitorCheck[]>> {
   return tryCatch(() => withWriteLock(historyLockKey(check.monitorId), async () => {
     const item = historyItem(check.monitorId);
     const current = await item.getValue();
-    const next = [check, ...current].slice(0, MAX_HISTORY_ENTRIES);
-    await item.setValue(next);
+
+    const last = current[0];
+    const isErrorRecovery = !!(last && last.error !== null && check.error === null);
+    const isValueChanged = !!(last && last.value !== check.value);
+    const isPeriodicSample = !!(last && (check.checkedAt - last.checkedAt >= UNCHANGED_SAMPLE_INTERVAL_MS));
+
+    const shouldRecord =
+      current.length === 0 ||
+      check.changed ||
+      check.error !== null ||
+      isErrorRecovery ||
+      isValueChanged ||
+      isPeriodicSample;
+
+    let next = shouldRecord ? [check, ...current] : current;
+
+    // Primary retention: 30 days
+    const now = check.checkedAt;
+    const cutoff = now - HISTORY_RETENTION_MS;
+    next = next.filter((entry) => entry.checkedAt >= cutoff);
+
+    // Hard safety ceiling
+    if (next.length > MAX_HISTORY_ENTRIES) {
+      next = next.slice(0, MAX_HISTORY_ENTRIES);
+    }
+
+    if (shouldRecord || next.length !== current.length) {
+      await item.setValue(next);
+    }
     return next;
   }), 'STORAGE_WRITE_FAILED');
 }

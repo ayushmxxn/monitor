@@ -66,12 +66,17 @@ export function useStorage<TValue>(
 
   const update = useCallback(
     async (next: TValue) => {
+      const previous = (storageCache.has(item.key) ? storageCache.get(item.key) : item.fallback) as TValue;
       storageCache.set(item.key, next);
       setValue(next);
       try {
         await item.setValue(next);
       } catch (error) {
         console.error('[useStorage] Failed to set', item.key, error);
+        // Revert the optimistic update so the UI never claims a change
+        // that storage rejected.
+        storageCache.set(item.key, previous);
+        setValue(previous);
       }
     },
     [item],

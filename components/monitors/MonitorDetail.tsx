@@ -36,6 +36,7 @@ import { HistoryChart } from './HistoryChart';
 import { DeleteMonitorDialog } from './DeleteMonitorDialog';
 import { useMonitor } from '@/hooks/useMonitor';
 import { useMonitorHistory } from '@/hooks/useMonitorHistory';
+import { useIsChecking } from '@/hooks/useIsChecking';
 import { checkMonitorNow } from '@/lib/monitors/client';
 import { deleteMonitor, updateMonitor } from '@/lib/monitors/store';
 import { sendMessage } from '@/lib/messaging';
@@ -74,6 +75,10 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
   const { monitor, isLoading } = useMonitor(monitorId);
   const { history } = useMonitorHistory(monitorId);
   const [isChecking, setIsChecking] = useState(false);
+  const isCheckingInFlight = useIsChecking(monitorId);
+  const isCheckingActive = isChecking || isCheckingInFlight;
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isTogglingEnabled, setIsTogglingEnabled] = useState(false);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
@@ -178,21 +183,32 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
       history,
       monitor?.lastValue,
       monitor?.lastSemanticValue,
+      monitor?.stats,
     );
-  }, [history, monitor?.lastValue, monitor?.lastSemanticValue]);
+  }, [history, monitor?.lastValue, monitor?.lastSemanticValue, monitor?.stats]);
 
   useEffect(() => {
     if (!monitor) return;
     let cancelled = false;
-    sendMessage('checkOriginPermissions', [monitor.url])
-      .then((granted) => {
-        if (!cancelled) setHasPermission(granted[monitor.url] ?? null);
-      })
-      .catch(() => {
+    async function refreshAccess() {
+      try {
+        const granted = await sendMessage('checkOriginPermissions', [monitor!.url]);
+        if (!cancelled) setHasPermission(granted[monitor!.url] ?? null);
+      } catch {
         if (!cancelled) setHasPermission(null);
-      });
+      }
+    }
+    void refreshAccess();
+    // Re-check when the page regains focus: granting access happens in
+    // the options tab, so returning here must immediately reflect the
+    // recovery (or its absence) instead of waiting on a remount.
+    function handleFocus() {
+      void refreshAccess();
+    }
+    window.addEventListener('focus', handleFocus);
     return () => {
       cancelled = true;
+      window.removeEventListener('focus', handleFocus);
     };
   }, [monitor?.url]);
 
@@ -249,8 +265,8 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
     type: AlertConditionType,
     valStr: string,
     txtStr: string,
-  ) {
-    if (!monitor) return;
+  ): Promise<boolean> {
+    if (!monitor) return false;
     let numericTarget: number | null = null;
     if (type === 'below' || type === 'above') {
       const cleaned = valStr.replace(/[^0-9.-]/g, '');
@@ -267,7 +283,17 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
       targetValue: numericTarget,
       targetText: type === 'matches' ? txtStr : null,
     };
-    await updateMonitor(monitor.id, { alertCondition });
+    const result = await updateMonitor(monitor.id, { alertCondition });
+    if (!result.ok) {
+      setActionError(result.error.toDisplayMessage());
+      // Revert the optimistic condition UI to the last persisted values.
+      const stored = monitor.alertCondition;
+      setConditionType(stored?.type ?? 'any');
+      setTargetValueStr(stored?.targetValue != null ? String(stored.targetValue) : '');
+      setTargetTextStr(stored?.targetText ?? '');
+      return false;
+    }
+    return true;
   }
 
   function handleConditionTypeChange(nextType: AlertConditionType) {
@@ -327,26 +353,54 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
 
   async function handleCheckNow() {
     setIsChecking(true);
-    await checkMonitorNow(monitor!.id);
-    setIsChecking(false);
+    setCheckError(null);
+    try {
+      const result = await checkMonitorNow(monitor!.id);
+      if (!result.ok) {
+        setCheckError(result.error.toDisplayMessage());
+      }
+    } finally {
+      setIsChecking(false);
+    }
   }
 
   async function handleDelete() {
+    if (!monitor) return;
     setIsDeleting(true);
-    await deleteMonitor(monitor!.id);
-    onDeleted();
+    setActionError(null);
+    try {
+      const result = await deleteMonitor(monitor.id);
+      if (!result.ok) {
+        setActionError(result.error.toDisplayMessage());
+        return;
+      }
+      onDeleted();
+    } finally {
+      setIsDeleting(false);
+    }
   }
 
   async function handleToggleEnabled() {
     if (!monitor) return;
     setIsTogglingEnabled(true);
-    await updateMonitor(monitor.id, { enabled: !monitor.enabled });
-    setIsTogglingEnabled(false);
+    setActionError(null);
+    try {
+      const result = await updateMonitor(monitor.id, { enabled: !monitor.enabled });
+      if (!result.ok) {
+        setActionError(result.error.toDisplayMessage());
+      }
+    } finally {
+      setIsTogglingEnabled(false);
+    }
   }
 
   async function handleRename(newName: string) {
     if (!monitor) return;
-    await updateMonitor(monitor.id, { name: newName });
+    setActionError(null);
+    const result = await updateMonitor(monitor.id, { name: newName });
+    if (!result.ok) {
+      setActionError(result.error.toDisplayMessage());
+    }
   }
 
   let hostname = monitor.url;
@@ -430,7 +484,7 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
             </Badge>
           ) : (
             <MonitorStatusBadge
-              status={monitor.lastStatus}
+              status={isCheckingActive ? 'checking' : monitor.lastStatus}
               diagnosticCode={monitor.lastDiagnosticCode}
               lastError={monitor.lastError}
             />
@@ -454,9 +508,7 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
                 'inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[11px] font-medium leading-none',
                 benchmarks.dealStatus === 'all-time-low'
                   ? 'bg-emerald-500/15 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400'
-                  : benchmarks.dealStatus === 'near-lowest'
-                    ? 'bg-muted text-muted-foreground'
-                    : 'bg-amber-500/10 text-amber-700 dark:text-amber-400',
+                  : 'bg-muted text-muted-foreground',
               )}
             >
               {benchmarks.dealStatus === 'near-lowest' ? 'Near low' : benchmarks.dealStatusLabel}
@@ -504,11 +556,14 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
         </div>
       </div>
 
+      {checkError && <InlineNotice tone="error">{checkError}</InlineNotice>}
+      {actionError && <InlineNotice tone="error">{actionError}</InlineNotice>}
+
       <div className="flex w-full items-center gap-2">
         {monitor.enabled ? (
-          <Button size="sm" className="h-7 shrink-0 text-xs" onClick={handleCheckNow} disabled={isChecking}>
-            {isChecking ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-            {isChecking ? 'Checking…' : isError ? 'Retry check' : 'Check now'}
+          <Button size="sm" className="h-7 shrink-0 text-xs" onClick={handleCheckNow} disabled={isCheckingActive}>
+            {isCheckingActive ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+            {isCheckingActive ? 'Checking…' : isError ? 'Retry check' : 'Check now'}
           </Button>
         ) : (
           <Button
@@ -686,22 +741,6 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
               aria-label="More actions"
               className="absolute top-full right-0 z-50 mt-1 w-44 rounded-md border border-border bg-popover p-1 shadow-md animate-enter-up"
             >
-              {!monitor.enabled && (
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
-                  onClick={() => {
-                    setIsMenuOpen(false);
-                    handleCheckNow();
-                  }}
-                  disabled={isChecking}
-                >
-                  <RefreshCw className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                  <span>Check now</span>
-                </button>
-              )}
-
               <button
                 type="button"
                 role="menuitem"

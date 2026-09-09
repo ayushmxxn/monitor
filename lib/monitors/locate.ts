@@ -161,10 +161,12 @@ export function locateAndExtract(
           value = token;
         }
       }
-
-      if (value === null) {
-        value = extracted;
-      }
+      // A numeric monitor with no valid numeric token reports failure
+      // rather than falling back to the raw text (e.g. "Out of stock"):
+      // storing that text as a successful value would silently flip the
+      // monitor's type, poison lastSemanticValue, and suppress numeric
+      // alert conditions while looking healthy. Text monitors are
+      // unaffected - they keep the raw text path above.
     }
   }
 
@@ -184,7 +186,7 @@ export function locateAndExtract(
       ? buildFingerprint(element, win, updatedAnchor)
       : null;
 
-  if (extracted === null) {
+  if (extracted === null || (isNumericMonitor && value === null)) {
     return {
       value: null,
       diagnostic: diagnostic('EXTRACTION_EMPTY'),

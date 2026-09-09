@@ -2298,6 +2298,62 @@ section('Concurrency: dedupeInFlight joins an already-running check instead of d
   assert(!failing.has('will-fail'), 'a failed run is still cleaned up from the map, not left stuck as permanently "in flight"');
 }
 
+// ---------------------------------------------------------------------
+// Scenario: Client checkNow in-flight deduplication and active tracking.
+// ---------------------------------------------------------------------
+section('Concurrency: checkMonitorNow client deduplication and checking subscription');
+
+{
+  const inFlight = new Map<string, Promise<any>>();
+  const checkingListeners = new Set<() => void>();
+  let runs = 0;
+
+  function isMonitorChecking(id: string) {
+    return inFlight.has(id);
+  }
+
+  function subscribe(fn: () => void) {
+    checkingListeners.add(fn);
+    return () => checkingListeners.delete(fn);
+  }
+
+  function mockCheckMonitorNow(id: string): Promise<any> {
+    const existing = inFlight.get(id);
+    if (existing) return existing;
+
+    const promise = (async () => {
+      runs += 1;
+      await new Promise((r) => setTimeout(r, 15));
+      return { ok: true, value: undefined };
+    })().finally(() => {
+      inFlight.delete(id);
+      checkingListeners.forEach((l) => l());
+    });
+
+    inFlight.set(id, promise);
+    checkingListeners.forEach((l) => l());
+    return promise;
+  }
+
+  let notifyCount = 0;
+  const unsub = subscribe(() => {
+    notifyCount++;
+  });
+
+  const p1 = mockCheckMonitorNow('m-1');
+  const p2 = mockCheckMonitorNow('m-1');
+  assert(p1 === p2, 'concurrent calls return the exact same in-flight promise');
+  assert(isMonitorChecking('m-1'), 'isMonitorChecking returns true while check is active');
+
+  const [res1, res2] = await Promise.all([p1, p2]);
+  assert(runs === 1, 'concurrent checkMonitorNow calls run only once (deduped)');
+  assert(res1.ok && res2.ok, 'both concurrent callers receive ok: true');
+  assert(!isMonitorChecking('m-1'), 'after settling, monitor is no longer checking');
+  assert(notifyCount >= 2, 'subscribers are notified on start and finish');
+  unsub();
+}
+
+
 // =======================================================================
 // YouTube regression suite.
 //
@@ -4186,6 +4242,59 @@ section('Error handling and recovery: failure reason classification, cascade dia
   assert(metricRecovered.value === '1.75M', `numeric monitor recovers canonical value "1.75M" without surrounding text (got ${JSON.stringify(metricRecovered.value)})`);
   assert(metricRecovered.semanticValue?.type === 'followers', 'semantic type followers preserved');
   assert(metricRecovered.semanticValue?.normalized === 1_750_000, 'normalized count is 1750000');
+}
+
+// ---------------------------------------------------------------------
+// H1: a numeric monitor whose element renders non-numeric text (e.g.
+// "Out of stock") must fail with EXTRACTION_EMPTY instead of storing
+// the raw text as a successful value with an OK diagnostic (which
+// would silently flip its type and suppress numeric alert conditions).
+// ---------------------------------------------------------------------
+{
+  section('H1: numeric monitor fails cleanly on non-numeric text, recovers on numeric');
+
+  const h1Dom = new JSDOM(`<!doctype html><html><body><div id="price">$49.99</div></body></html>`);
+  const h1doc = h1Dom.window.document;
+  (globalThis as any).window = h1Dom.window;
+  (globalThis as any).document = h1doc;
+  (globalThis as any).Node = h1Dom.window.Node;
+  const h1win = h1Dom.window as unknown as Window;
+
+  const h1PriceEl = h1doc.getElementById('price')!;
+  const h1PriceFp = buildFingerprint(h1PriceEl, h1win);
+
+  // 1. Valid numeric value -> unchanged behavior.
+  const h1Init = locateAndExtract(h1doc, h1PriceFp, 'text', null, h1win);
+  assert(h1Init.value === '$49.99', `valid numeric extracts "$49.99" (got ${JSON.stringify(h1Init.value)})`);
+  assert(h1Init.diagnostic.code === 'OK', `valid numeric diagnostic is OK (got ${h1Init.diagnostic.code})`);
+  assert(h1Init.semanticValue?.type === 'currency', `semantic type is currency (got ${h1Init.semanticValue?.type})`);
+  assert(h1Init.semanticValue?.normalized === 49.99, `normalized is 49.99 (got ${h1Init.semanticValue?.normalized})`);
+
+  // 2. Non-numeric text states -> extraction failure, never a healthy text value.
+  for (const badText of ['Out of stock', 'N/A', 'Unavailable']) {
+    h1PriceEl.textContent = badText;
+    const bad = locateAndExtract(h1doc, h1PriceFp, 'text', null, h1win);
+    assert(bad.value === null, `"${badText}" produces null value (got ${JSON.stringify(bad.value)})`);
+    assert(
+      bad.diagnostic.code === 'EXTRACTION_EMPTY',
+      `"${badText}" diagnostic is EXTRACTION_EMPTY (got ${bad.diagnostic.code})`,
+    );
+    assert(bad.semanticValue === null, `"${badText}" semanticValue is null`);
+  }
+
+  // 3. Recovery back to numeric -> correct value and numeric classification.
+  h1PriceEl.textContent = '$44.99';
+  const h1Recovered = locateAndExtract(h1doc, h1PriceFp, 'text', null, h1win);
+  assert(h1Recovered.value === '$44.99', `recovery extracts "$44.99" (got ${JSON.stringify(h1Recovered.value)})`);
+  assert(h1Recovered.diagnostic.code === 'OK', `recovery diagnostic is OK (got ${h1Recovered.diagnostic.code})`);
+  assert(
+    h1Recovered.semanticValue?.type === 'currency',
+    `recovery semantic type is currency (got ${h1Recovered.semanticValue?.type})`,
+  );
+  assert(
+    h1Recovered.semanticValue?.normalized === 44.99,
+    `recovery normalized is 44.99 (got ${h1Recovered.semanticValue?.normalized})`,
+  );
 }
 
 // ---------------------------------------------------------------------

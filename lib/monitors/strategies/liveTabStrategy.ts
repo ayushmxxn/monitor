@@ -65,7 +65,10 @@ if (typeof browser !== 'undefined') {
 
   browser.windows?.onRemoved?.addListener((removedWindowId) => {
     void (async () => {
-      const existing = await liveCheckWindowItem.getValue();
+      // The window handle is ephemeral best-effort state: an unreadable
+      // record is treated as "nothing on record" rather than surfacing
+      // as an unhandled rejection out of this fire-and-forget listener.
+      const existing = await liveCheckWindowItem.getValue().catch(() => null);
       if (existing?.windowId === removedWindowId) {
         await liveCheckWindowItem.setValue(null);
       }
@@ -77,7 +80,10 @@ if (typeof browser !== 'undefined') {
 /** Closes the shared background window, if one is still on record, and forgets it. Safe to call when there's nothing to close. */
 export async function closeBackgroundWindow(): Promise<void> {
   browser.alarms.clear(SAFETY_NET_ALARM_NAME).catch(() => {});
-  const existing = await liveCheckWindowItem.getValue();
+  // Same ephemeral-handle reasoning as the onRemoved listener above:
+  // this runs fire-and-forget from endLiveCheck, so an unreadable
+  // record resolves to "nothing to close" instead of rejecting.
+  const existing = await liveCheckWindowItem.getValue().catch(() => null);
   if (!existing) return;
   await liveCheckWindowItem.setValue(null);
   try {

@@ -7,7 +7,7 @@ import {
   formatDurationSeconds,
   detectSemanticValue,
 } from './semanticValue';
-import type { MonitorCheck } from './types';
+import type { HistoricalStats, MonitorCheck } from './types';
 
 export type DealStatus = 'all-time-low' | 'near-lowest' | 'all-time-high';
 
@@ -70,7 +70,7 @@ export function formatBenchmarkValue(
 
 /**
  * Calculates all-time low, all-time high, historical average, date of all-time low,
- * and contextual deal status for a monitor based on its check history.
+ * and contextual deal status for a monitor based on its check history and persisted aggregate stats.
  *
  * Gracefully returns null for text monitors, empty history, or insufficient history (< 2 points).
  */
@@ -78,6 +78,7 @@ export function calculateHistoricalBenchmarks(
   history: MonitorCheck[] | null | undefined,
   currentValue?: string | null,
   currentSemantic?: SemanticValue | null,
+  stats?: HistoricalStats | null,
 ): HistoricalBenchmarks | null {
   if (!history || history.length < 2) {
     return null;
@@ -124,14 +125,33 @@ export function calculateHistoricalBenchmarks(
     null;
 
   const values = numericPoints.map((p) => p.sem.normalized as number);
-  const low = Math.min(...values);
-  const high = Math.max(...values);
-  const sum = values.reduce((acc, v) => acc + v, 0);
-  const average = sum / values.length;
+  const localLow = Math.min(...values);
+  const localHigh = Math.max(...values);
+  const localSum = values.reduce((acc, v) => acc + v, 0);
+  const localAverage = localSum / values.length;
 
-  // Find the check corresponding to the all-time low
-  const lowPoint = numericPoints.find((p) => Math.abs((p.sem.normalized as number) - low) < 1e-9) ?? numericPoints[0];
-  const lowDate = lowPoint.check.checkedAt;
+  // Find the check corresponding to the local low
+  const lowPoint = numericPoints.find((p) => Math.abs((p.sem.normalized as number) - localLow) < 1e-9) ?? numericPoints[0];
+  const localLowDate = lowPoint.check.checkedAt;
+
+  // Blend with persisted all-time stats if available
+  let low = localLow;
+  let high = localHigh;
+  let average = localAverage;
+  let lowDate = localLowDate;
+
+  if (stats && stats.count > 0) {
+    if (stats.low < low) {
+      low = stats.low;
+      lowDate = stats.lowDate;
+    }
+    if (stats.high > high) {
+      high = stats.high;
+    }
+    if (stats.count >= values.length && stats.sum > 0) {
+      average = stats.sum / stats.count;
+    }
+  }
 
   const formattedLow = formatBenchmarkValue(refType, unit, low);
   const formattedHigh = formatBenchmarkValue(refType, unit, high);

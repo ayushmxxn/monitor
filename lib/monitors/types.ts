@@ -100,6 +100,16 @@ export interface Monitor {
    * alerts fire on any detected value change (default backward-compatible behavior).
    */
   alertCondition?: AlertCondition | null;
+  /** Lightweight persisted all-time aggregate stats (low, high, average sum/count). */
+  stats?: HistoricalStats | null;
+}
+
+export interface HistoricalStats {
+  low: number;
+  lowDate: number;
+  high: number;
+  sum: number;
+  count: number;
 }
 
 export type AlertConditionType =
@@ -146,4 +156,9 @@ export interface CreateMonitorInput {
   intervalMinutes?: number;
 }
 
-export const MAX_HISTORY_ENTRIES = 50;
+/** Hard safety ceiling for history retention per monitor. */
+export const MAX_HISTORY_ENTRIES = 1000;
+/** Primary retention period: 30 days. */
+export const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+/** Periodic sampling interval for identical unchanged checks. */
+export const UNCHANGED_SAMPLE_INTERVAL_MS = 60 * 60 * 1000;

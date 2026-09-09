@@ -9,6 +9,9 @@ import {
   SettingSelectRow,
 } from "@/components/settings/SettingRow";
 import { SettingsSection } from "@/components/settings/SettingsSection";
+import { WebhookSettings } from "@/components/settings/WebhookSettings";
+import { DiscordSettings } from "@/components/settings/DiscordSettings";
+import { SiteAccessSection } from "@/components/settings/SiteAccessSection";
 import { Button } from "@/components/ui/button";
 import { useAppInfo } from "@/hooks/useAppInfo";
 import { useStorage } from "@/hooks/useStorage";
@@ -49,7 +52,7 @@ function OptionsContent() {
         <div>
           <h1 className="text-base font-semibold tracking-tight">Settings</h1>
           <p className="text-[12.5px] text-muted-foreground">
-            Monitor runs entirely on this device. Nothing here is sent anywhere.
+            Monitor runs entirely on this device, except webhook alerts you explicitly configure.
           </p>
         </div>
 
@@ -88,6 +91,22 @@ function OptionsContent() {
             onValueChange={(theme) => setSettings({ ...settings, theme })}
           />
         </SettingsSection>
+
+        <SiteAccessSection />
+
+        <WebhookSettings
+          settings={settings}
+          onChange={setSettings}
+          disabled={isLoading}
+          idPrefix="options"
+        />
+
+        <DiscordSettings
+          settings={settings}
+          onChange={setSettings}
+          disabled={isLoading}
+          idPrefix="options"
+        />
 
         <SettingsSection title="Data">
           <SettingActionRow
