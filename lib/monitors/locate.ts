@@ -227,8 +227,69 @@ function extractValue(
     const trimmed = attr.trim();
     return trimmed.length > 0 ? trimmed : null;
   }
-  const text = extractAnchoredText(element, fp.textAnchor) ?? extractVisibleText(element);
+  const anchored = extractAnchoredText(element, fp.textAnchor);
+  if (anchored) return anchored;
+  // The frame is intact (whatever of it exists is still there) yet
+  // nothing inside it resolved: the landmarks are watching a different
+  // arrangement, so guessing the whole element text here (and, for
+  // numeric monitors, a token out of it) would manufacture a
+  // plausible-but-wrong value. Report empty and let the check-level
+  // fallback and retry handling deal with it. A partially or fully
+  // missing frame instead means a reshaped element, where the whole
+  // visible text remains the best available reading.
+  const anchor = fp.textAnchor;
+  if (anchor && (anchor.before || anchor.after)) {
+    const full = normalizeText(element.textContent ?? '');
+    const beforeOk = !anchor.before || full.includes(anchor.before);
+    const afterOk = !anchor.after || full.includes(anchor.after);
+    if (beforeOk && afterOk) return null;
+  }
+  const text = extractVisibleText(element);
   return text.length > 0 ? text : null;
+}
+
+/**
+ * End offset of the latest `before` occurrence that still has `after`
+ * following it (-1 when no such frame exists). Repeated labels
+ * ("Total … Total $100") must slice from the nearest frame, not the
+ * first one - otherwise the window swallows the span in between and a
+ * run inside it looks anchored when it isn't. Identical to a plain
+ * first-occurrence slice when the label occurs once.
+ */
+function latestBeforeEnd(full: string, before: string, after: string | null | undefined): number {
+  let best = -1;
+  let from = 0;
+  for (;;) {
+    const idx = full.indexOf(before, from);
+    if (idx === -1) break;
+    const endIdx = idx + before.length;
+    if (!after || full.indexOf(after, endIdx) !== -1) best = endIdx;
+    from = endIdx;
+  }
+  return best;
+}
+
+/**
+ * Verifies the sliced candidate really sits as before < value < after:
+ * a candidate containing its own frame text means the window overshot
+ * (repeated labels), and a still-present anchor value must lie inside
+ * the window. An anchor value that already changed is unverifiable and
+ * skips that sub-check - the frame checks still apply.
+ */
+function isOrderedCandidate(
+  full: string,
+  start: number,
+  end: number,
+  anchor: TextAnchor,
+  candidate: string,
+): boolean {
+  if (anchor.before && candidate.includes(anchor.before)) return false;
+  if (anchor.after && candidate.includes(anchor.after)) return false;
+  if (anchor.value) {
+    const valueIndex = full.indexOf(anchor.value, start);
+    if (valueIndex !== -1 && valueIndex + anchor.value.length > end) return false;
+  }
+  return true;
 }
 
 /**
@@ -246,14 +307,17 @@ function extractAnchoredText(element: Element, anchor: TextAnchor | null | undef
     const hasBefore = !anchor.before || full.includes(anchor.before);
     const hasAfter = !anchor.after || full.includes(anchor.after);
     if (hasBefore && hasAfter) {
-      const start = anchor.before ? full.indexOf(anchor.before) + anchor.before.length : 0;
-      const end = anchor.after ? full.indexOf(anchor.after, start) : full.length;
+      const start = anchor.before ? latestBeforeEnd(full, anchor.before, anchor.after) : 0;
+      const end = start >= 0 && anchor.after ? full.indexOf(anchor.after, start) : full.length;
       if (start >= 0 && end > start) {
         const candidate = full.slice(start, end).trim();
-        if (candidate.length > 0) {
+        if (candidate.length > 0 && isOrderedCandidate(full, start, end, anchor, candidate)) {
           const matchingRun = runs.find((r) => r === candidate || candidate.includes(r));
           return matchingRun ?? candidate;
         }
+        // Positionally invalid: fall through to the parent gate and
+        // the exact/single-run fallbacks below rather than returning a
+        // plausible-but-wrong value from an oversized span.
       }
     }
     const parentFull = element.parentElement ? normalizeText(element.parentElement.textContent ?? '') : '';

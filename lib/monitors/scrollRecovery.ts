@@ -89,7 +89,9 @@ export async function searchByScrolling<T>(
   const now = options.now ?? Date.now;
   const deadline = options.deadline ?? Infinity;
 
-  let lastHeight = host.read().scrollHeight;
+  const initial = host.read();
+  let lastHeight = initial.scrollHeight;
+  let lastY = initial.scrollY;
   let stableRounds = 0;
 
   for (let step = 0; step < maxSteps; step++) {
@@ -106,7 +108,11 @@ export async function searchByScrolling<T>(
     }
 
     const state = host.read();
-    if (state.scrollHeight <= lastHeight) {
+    // Height alone can't declare the bottom: virtualized/windowed lists
+    // preallocate their full height and swap rows without growing it.
+    // Only count a round as stable when the scroll position also stopped
+    // advancing - i.e. the page genuinely has nowhere left to go.
+    if (state.scrollHeight <= lastHeight && state.scrollY <= lastY + 2) {
       stableRounds += 1;
       if (stableRounds >= STABLE_ROUNDS_TO_STOP) {
         return { result: null, steps: step + 1, reachedBottom: true };
@@ -115,6 +121,7 @@ export async function searchByScrolling<T>(
       stableRounds = 0;
     }
     lastHeight = state.scrollHeight;
+    lastY = state.scrollY;
   }
   return { result: null, steps: maxSteps, reachedBottom: false };
 }

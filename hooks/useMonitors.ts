@@ -9,7 +9,7 @@ interface UseMonitorsResult {
   monitors: Monitor[];
   isLoading: boolean;
   error: AppError | null;
-  remove: (id: string) => Promise<void>;
+  remove: (id: string) => Promise<boolean>;
 }
 
 /**
@@ -26,10 +26,11 @@ export function useMonitors(): UseMonitorsResult {
   const [monitors, , isLoading] = useStorage(monitorsItem);
   const [error, setError] = useState<AppError | null>(null);
 
-  const remove = useCallback(async (id: string) => {
+  const remove = useCallback(async (id: string): Promise<boolean> => {
     setError(null);
     const result = await store.deleteMonitor(id);
     if (!result.ok) setError(result.error);
+    return result.ok;
   }, []);
 
   return { monitors, isLoading, error, remove };

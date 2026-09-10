@@ -77,7 +77,41 @@ const MIN_SCROLL_BUDGET_MS = 1_500;
 /** Diagnostics where the element genuinely wasn't found (as opposed to being blocked by auth/automation walls, which scrolling can't fix). */
 const SCROLL_RETRY_CODES = new Set(['ELEMENT_NOT_FOUND', 'SELECTOR_RECOVERY_LOW_CONFIDENCE']);
 
-async function runLocate(
+/**
+ * Whether scroll recovery may run for this outcome. Reserved for
+ * fingerprints carrying an `itemAnchor` (see `scrollRecovery.ts`):
+ * only a virtualized list can mount new content in response to
+ * scrolling, so an ordinary non-feed monitor - however deep on the
+ * page - must never burn budget scrolling. Exported for tests.
+ */
+export function shouldAttemptScrollRecovery(
+  fp: Pick<ElementFingerprint, 'itemAnchor'>,
+  diagnosticCode: string,
+): boolean {
+  return Boolean(fp.itemAnchor) && SCROLL_RETRY_CODES.has(diagnosticCode);
+}
+
+/**
+ * Runs `task`, then restores the exact scroll position from before it -
+ * on success, on failure, and on early exit alike - so recovery never
+ * leaves the user's page scrolled somewhere they didn't put it. Adds
+ * no waiting, polling, or retries of its own. Exported for tests.
+ */
+export async function withRestoredScrollY<T>(
+  getY: () => number,
+  scrollToY: (y: number) => void,
+  task: () => Promise<T>,
+): Promise<T> {
+  const savedY = getY();
+  try {
+    return await task();
+  } finally {
+    scrollToY(savedY);
+  }
+}
+
+/** Exported for tests (scroll-gate coverage); production calls it via the injected page agent. */
+export async function runLocate(
   fpJson: string,
   extractMode: 'text' | 'attribute',
   attributeName: string | null,
@@ -126,7 +160,13 @@ async function runLocate(
     { maxTotalWaitMs: primaryBudgetMs },
   );
 
-  const shouldTryScroll = (isFeedItem || (fp.relativeBox !== null && fp.relativeBox.y > 0.8)) && SCROLL_RETRY_CODES.has(outcome.diagnostic.code);
+  // Both conditions: the monitor must have started as a feed item
+  // (healed fingerprints re-derive their anchor from wherever recovery
+  // landed, so the current one alone must not widen recovery to
+  // originally ordinary monitors) and the outcome must be a genuine
+  // miss that scrolling could fix.
+  const shouldTryScroll =
+    isFeedItem && shouldAttemptScrollRecovery(fp, outcome.diagnostic.code);
   if (outcome.value === null && shouldTryScroll) {
     const remainingMs = totalBudgetMs - (Date.now() - start);
     if (remainingMs >= MIN_SCROLL_BUDGET_MS) {
@@ -164,27 +204,33 @@ async function maybeRecoverByScrolling(
   read: () => LocateAndExtractResult,
   remainingMs: number,
 ): Promise<LocateAndExtractResult | null> {
-  const host: ScrollHost = {
-    read: () => ({
-      scrollY: window.scrollY,
-      scrollHeight: document.documentElement.scrollHeight,
-    }),
-    scrollDown: () => {
-      window.scrollBy(0, Math.max(window.innerHeight * 0.85, 400));
-    },
-  };
+  return withRestoredScrollY(
+    () => window.scrollY,
+    (y) => window.scrollTo(0, y),
+    async () => {
+      const host: ScrollHost = {
+        read: () => ({
+          scrollY: window.scrollY,
+          scrollHeight: document.documentElement.scrollHeight,
+        }),
+        scrollDown: () => {
+          window.scrollBy(0, Math.max(window.innerHeight * 0.85, 400));
+        },
+      };
 
-  const { result } = await searchByScrolling(
-    host,
-    () => {
-      const attempt = read();
-      return attempt.value !== null ? attempt : null;
+      const { result } = await searchByScrolling(
+        host,
+        () => {
+          const attempt = read();
+          return attempt.value !== null ? attempt : null;
+        },
+        sleep,
+        { deadline: Date.now() + remainingMs },
+      );
+
+      return result;
     },
-    sleep,
-    { deadline: Date.now() + remainingMs },
   );
-
-  return result;
 }
 
 /**
@@ -547,6 +593,17 @@ async function runPicker(): Promise<PickResult> {
 
       form.appendChild(header);
 
+      // The value being monitored, shown before anything is saved: the
+      // last chance to catch a hover/click mismatch (the tooltip already
+      // scrolled away with the cursor). Compact and muted like the
+      // description above it, ellipsized rather than wrapped.
+      const valuePreview = document.createElement('div');
+      valuePreview.textContent = namingValuePreview(resolved);
+      valuePreview.style.cssText =
+        `font-size:12px;line-height:1.5;color:${MUTED_FOREGROUND};` +
+        'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      form.appendChild(valuePreview);
+
       const input = document.createElement('input');
       input.type = 'text';
       // Leave the field empty by default so naming is always an
@@ -684,18 +741,56 @@ async function runPicker(): Promise<PickResult> {
   });
 }
 
-/** Reject a click if a rerender or pointer move changed the value/context since hover. */
-function sameSelection(a: PickerTarget, b: PickerTarget): boolean {
-  return (
-    a.text === b.text &&
-    a.textAnchor.before === b.textAnchor.before &&
-    a.textAnchor.after === b.textAnchor.after &&
-    a.label === b.label
-  );
+/**
+ * Reject a click if a rerender or pointer move changed the value/context
+ * since hover - with one deliberate exception: the very same live node
+ * is always accepted, even if its text ticked in the meantime, because
+ * the fingerprint is built from the click-time state and the naming
+ * step shows that value for confirmation.
+ *
+ * Two different nodes pass only with fully identical content (text,
+ * canonical value, anchors, label) AND the same on-screen slot: a
+ * hover node already detached by a re-render has no box left to
+ * compare, so content alone decides there (a re-created equivalent in
+ * the same slot keeps working), while wrappers resolved as parent vs
+ * inner span nest and still count. A duplicate value in another row -
+ * identical text, different box - is rejected instead of silently
+ * monitoring the wrong row. Exported for tests.
+ */
+export function sameSelection(a: PickerTarget, b: PickerTarget): boolean {
+  if (a.element === b.element) return true;
+  if (
+    a.text !== b.text ||
+    a.canonicalValue !== b.canonicalValue ||
+    a.textAnchor.before !== b.textAnchor.before ||
+    a.textAnchor.after !== b.textAnchor.after ||
+    a.label !== b.label
+  ) {
+    return false;
+  }
+  if (!a.element.isConnected) return true;
+  if (a.element.contains(b.element) || b.element.contains(a.element)) return true;
+  return sameScreenPosition(a.element, b.element);
+}
+
+/** Same top-left within a couple px of subpixel/rounding slack (not layout drift). */
+function sameScreenPosition(a: Element, b: Element): boolean {
+  const ra = a.getBoundingClientRect();
+  const rb = b.getBoundingClientRect();
+  return Math.abs(ra.top - rb.top) <= 2 && Math.abs(ra.left - rb.left) <= 2;
 }
 
 /** Width of the naming field injected into the page - shared with `positionForm` below so the two never drift apart. */
 const FORM_WIDTH = 300;
+
+/**
+ * The confirmation line for the naming step: the exact canonical value
+ * about to be monitored. Pure so it stays identical between the form
+ * and tests - export is for tests only.
+ */
+export function namingValuePreview(target: PickerTarget): string {
+  return `Selected value: ${target.canonicalValue}`;
+}
 
 /** Anchors the naming field just below-left of `target`, flipped above when there's no room below, and clamped so it never runs off the viewport. */
 function positionForm(form: HTMLDivElement, target: Element): void {

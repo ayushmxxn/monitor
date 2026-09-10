@@ -27,7 +27,15 @@ export async function notifyChange(
   previousSemantic?: SemanticValue | null,
   currentSemantic?: SemanticValue | null,
 ): Promise<void> {
-  const settings = await settingsItem.getValue();
+  let settings: Awaited<ReturnType<typeof settingsItem.getValue>>;
+  try {
+    settings = await settingsItem.getValue();
+  } catch {
+    // A failed settings read must not fail an otherwise successful
+    // check: skip every alert channel silently rather than inventing
+    // fallback defaults that could alert to the wrong endpoints.
+    return;
+  }
 
   const prev = previousValue !== undefined ? previousValue : monitor.lastValue;
   const prevSem = previousSemantic !== undefined ? previousSemantic : monitor.lastSemanticValue;

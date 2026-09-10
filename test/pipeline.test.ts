@@ -24,12 +24,18 @@ import { locateAndExtract, resolveSettledValue, extractVisibleText } from '../li
 import { waitForPageReady, waitForRegionReady } from '../lib/monitors/readiness';
 import { detectSemanticValue, compareSemanticValues, extractNumericToken } from '../lib/monitors/semanticValue';
 import { resolvePickerTarget, resolvePickerTargetAtPoint, formatPickerTooltip } from '../lib/monitors/pickerTarget';
+// pageAgent.content.ts is a WXT content script whose `defineContentScript`
+// call only exists at build time - stub it so the module (and its pure
+// picker helpers) can be imported in bun like any other module.
+(globalThis as any).defineContentScript ??= (opts: unknown) => opts;
+const { sameSelection, namingValuePreview, shouldAttemptScrollRecovery, withRestoredScrollY, runLocate } = await import('../entrypoints/pageAgent.content');
 import { locateOnTab, verifyTabSettled } from '../lib/monitors/pageAgentClient';
 import { ensureVisibilityPatchRegistered } from '../lib/monitors/visibilityPatch';
 import { navigateAndWaitForLoad } from '../lib/monitors/strategies/liveTabNavigation';
 import { resolveCheckUrl, resolveSourceUrl, stripTrackingParams } from '../lib/monitors/itemUrl';
 import { baseStrategyOrder } from '../lib/monitors/strategies/strategyOrder';
 import { searchByScrolling, type ScrollHost } from '../lib/monitors/scrollRecovery';
+import { detectAuthWall } from '../lib/monitors/antiAutomation';
 import { serializeByKey, dedupeInFlight } from '../lib/monitors/concurrency';
 import type { ElementFingerprint } from '../lib/monitors/fingerprint';
 import { ensureOffscreenDocument } from '../lib/monitors/offscreenManager';
@@ -1562,11 +1568,15 @@ function fakeScrollHost(growthPerStep: number, stopsGrowingAfterStep: number): S
   let scrollY = 0;
   let scrollHeight = 1000;
   let step = 0;
+  // Like a real viewport, scrolling past the end clamps instead of
+  // advancing forever - bottom detection keys off the position
+  // stopping, so the fake must model that.
+  const viewport = 600;
   return {
     read: () => ({ scrollY, scrollHeight }),
     scrollDown: () => {
       step += 1;
-      scrollY += 800;
+      scrollY = Math.min(scrollY + 800, Math.max(0, scrollHeight - viewport));
       if (step <= stopsGrowingAfterStep) scrollHeight += growthPerStep;
     },
   };
@@ -5189,6 +5199,466 @@ section('Scenario 32: Historical benchmarks and deal insights');
   const decimalAvgBenchmarks = calculateHistoricalBenchmarks(decimalAvgHistory, '$19.99');
   assert(Math.abs((decimalAvgBenchmarks?.average ?? 0) - 24.99) < 1e-9, 'average of $19.99 and $29.99 is 24.99');
   assert(decimalAvgBenchmarks?.formattedAverage === '$24.99', 'formatted average is $24.99');
+}
+
+// ---------------------------------------------------------------------
+// M9: the picker click guard distinguishes elements, not just text.
+// Two duplicate values in different rows share text/anchors/label, so
+// content alone would accept the wrong row; screen position separates
+// them, while a re-created equivalent in the same slot still passes
+// and the naming step shows the value for confirmation.
+// ---------------------------------------------------------------------
+{
+  section('M9: sameSelection distinguishes elements; naming shows the value');
+
+  const m9Dom = new JSDOM(`<!doctype html><html><body>
+    <div class="card" id="card-a"><span class="label">Likes</span><span class="metric">12</span></div>
+    <div class="card" id="card-b"><span class="label">Likes</span><span class="metric">12</span></div>
+  </body></html>`);
+  const m9doc = m9Dom.window.document;
+  (globalThis as any).window = m9Dom.window;
+  (globalThis as any).document = m9doc;
+  (globalThis as any).Node = m9Dom.window.Node;
+  (globalThis as any).CSS = m9Dom.window.CSS ?? { escape: (s: string) => s };
+
+  // jsdom lays out nothing - stub distinct row positions like real boxes.
+  const stubBox = (el: Element, top: number) => {
+    (el as any).getBoundingClientRect = () => ({
+      width: 40, height: 16, top, left: 10, right: 50, bottom: top + 16,
+    });
+  };
+
+  const first = m9doc.querySelector('#card-a .metric')!;
+  const second = m9doc.querySelector('#card-b .metric')!;
+  stubBox(first, 100);
+  stubBox(second, 200);
+
+  const t1 = resolvePickerTarget(first);
+  assert(t1 !== null, 'hover resolves the first metric');
+  const t1again = resolvePickerTarget(first);
+  assert(t1again !== null, 're-resolving the same element works');
+  assert(sameSelection(t1!, t1again!) === true, 'same element is still the same selection');
+
+  const t2 = resolvePickerTarget(second);
+  assert(t2 !== null, 'hover resolves the duplicate metric');
+  assert(
+    t2!.text === t1!.text &&
+      t2!.canonicalValue === t1!.canonicalValue &&
+      t2!.textAnchor.before === t1!.textAnchor.before &&
+      t2!.textAnchor.after === t1!.textAnchor.after &&
+      t2!.label === t1!.label,
+    'fixture really is identical text/context across rows (otherwise the test proves nothing)',
+  );
+  assert(
+    sameSelection(t1!, t2!) === false,
+    'different element with identical text is not the same selection',
+  );
+
+  // Legitimate re-render: the row's content is replaced in place (new
+  // nodes, same slot) - must keep working.
+  const cardA = m9doc.getElementById('card-a')!;
+  cardA.innerHTML = '<span class="label">Likes</span><span class="metric">12</span>';
+  const fresh = cardA.querySelector('.metric')!;
+  assert(fresh !== first, 're-render produced a new node');
+  stubBox(fresh, 100);
+  const t3 = resolvePickerTarget(fresh);
+  assert(t3 !== null, 're-rendered element resolves');
+  assert(sameSelection(t1!, t3!) === true, 're-rendered equivalent in the same slot still works');
+
+  // Live ticker on the same node: text changed, node identical - the
+  // click targets what the user hovered, verified in the naming step.
+  second.textContent = '13';
+  const t4 = resolvePickerTarget(second);
+  assert(t4 !== null, 'ticked element resolves');
+  assert(sameSelection(t2!, t4!) === true, 'same node with ticked text is still the same selection');
+
+  // The naming step shows the exact value for confirmation.
+  assert(
+    namingValuePreview(t1!) === 'Selected value: 12',
+    `naming preview shows the selected value (got ${JSON.stringify(namingValuePreview(t1!))})`,
+  );
+}
+
+// ---------------------------------------------------------------------
+// M10: anchor matching is positional (before < value < after). Repeated
+// labels slice from the nearest valid frame instead of the first one,
+// and an intact-but-unresolvable frame reports failure instead of
+// manufacturing a value - while reshaped elements and exact fallbacks
+// keep working as before.
+// ---------------------------------------------------------------------
+{
+  section('M10: positional anchor ordering rejects misarranged frames');
+
+  const m10Dom = new JSDOM(
+    `<!doctype html><html><body><div id="m">A <span>1</span> A <span>2</span> B</div></body></html>`,
+  );
+  const m10doc = m10Dom.window.document;
+  (globalThis as any).window = m10Dom.window;
+  (globalThis as any).document = m10doc;
+  (globalThis as any).Node = m10Dom.window.Node;
+  (globalThis as any).CSS = m10Dom.window.CSS ?? { escape: (s: string) => s };
+  const m10win = m10Dom.window as unknown as Window;
+
+  const mEl = m10doc.getElementById('m')!;
+  const mBase = buildFingerprint(mEl, m10win);
+  const withAnchor = (value: string, before: string, after: string) => ({
+    ...mBase,
+    textAnchor: { value, before, after },
+  });
+
+  // 1. Ordered anchors with a repeated label: nearest valid frame wins.
+  const ordered = locateAndExtract(m10doc, withAnchor('2', 'A', 'B'), 'text', null, m10win);
+  assert(
+    ordered.value === '2',
+    `repeated label resolves the correct value "2" (got ${JSON.stringify(ordered.value)})`,
+  );
+
+  // 2. Out-of-order frame on changed content: rejected, not guessed.
+  mEl.innerHTML = 'A <span>1</span> A <span>3</span> B';
+  const ooo = locateAndExtract(m10doc, withAnchor('2', 'B', 'A'), 'text', null, m10win);
+  assert(ooo.value === null, `out-of-order frame produces null value (got ${JSON.stringify(ooo.value)})`);
+  assert(
+    ooo.diagnostic.code === 'EXTRACTION_EMPTY',
+    `out-of-order frame reports EXTRACTION_EMPTY (got ${ooo.diagnostic.code})`,
+  );
+
+  // 3. Out-of-order frame on unchanged content still rescues the exact
+  // value through the existing exact-match fallback.
+  mEl.innerHTML = 'A <span>1</span> A <span>2</span> B';
+  const oooSame = locateAndExtract(m10doc, withAnchor('2', 'B', 'A'), 'text', null, m10win);
+  assert(
+    oooSame.value === '2',
+    `out-of-order frame with unchanged content still resolves "2" via exact match (got ${JSON.stringify(oooSame.value)})`,
+  );
+
+  // 4. Reshaped single-run element with a stale frame: the whole-text
+  // fallback is preserved.
+  const sEl = m10doc.createElement('div');
+  sEl.id = 's';
+  sEl.textContent = 'old text here';
+  m10doc.body.appendChild(sEl);
+  const sBase = buildFingerprint(sEl, m10win);
+  sEl.textContent = 'new reshaped content';
+  const reshaped = locateAndExtract(
+    m10doc,
+    { ...sBase, textAnchor: { value: 'old', before: 'zzz', after: 'qqq' } },
+    'text',
+    null,
+    m10win,
+  );
+  assert(
+    reshaped.value === 'new reshaped content',
+    `reshaped single-run element still reads whole text (got ${JSON.stringify(reshaped.value)})`,
+  );
+}
+
+// ---------------------------------------------------------------------
+// M12: scroll recovery runs only for feed/item-anchored fingerprints
+// and always puts the page back where the user had it - on success,
+// on failure, and on early exit.
+// ---------------------------------------------------------------------
+{
+  section('M12: feed-gated scroll recovery restores scroll position');
+
+  const feedFp = { itemAnchor: { href: '/someuser/status/222', isPermalink: true } } as any;
+  const plainFp = { itemAnchor: null } as any;
+  assert(
+    shouldAttemptScrollRecovery(feedFp, 'ELEMENT_NOT_FOUND') === true,
+    'feed item with a missing element may scroll',
+  );
+  assert(
+    shouldAttemptScrollRecovery(feedFp, 'SELECTOR_RECOVERY_LOW_CONFIDENCE') === true,
+    'feed item with a low-confidence miss may scroll',
+  );
+  assert(
+    shouldAttemptScrollRecovery(feedFp, 'AUTH_REQUIRED') === false,
+    'blocked diagnostics never scroll, even for feed items',
+  );
+  assert(
+    shouldAttemptScrollRecovery(feedFp, 'ANTI_AUTOMATION_DETECTED') === false,
+    'challenge pages never scroll, even for feed items',
+  );
+  assert(
+    shouldAttemptScrollRecovery(plainFp, 'ELEMENT_NOT_FOUND') === false,
+    'ordinary monitor never scrolls, however deep on the page',
+  );
+  assert(
+    shouldAttemptScrollRecovery({ itemAnchor: undefined } as any, 'SELECTOR_RECOVERY_LOW_CONFIDENCE') === false,
+    'missing anchor never scrolls',
+  );
+
+  let y = 320;
+  const restoredTo: number[] = [];
+  const getY = () => y;
+  const scrollToY = (v: number) => {
+    restoredTo.push(v);
+    y = v;
+  };
+  const okOut = await withRestoredScrollY(getY, scrollToY, async () => {
+    y = 900;
+    return 'done';
+  });
+  assert(okOut === 'done', 'restore wrapper passes the task result through');
+  assert(y === 320 && restoredTo[restoredTo.length - 1] === 320, 'success restores the original position');
+
+  let threw = false;
+  try {
+    await withRestoredScrollY(getY, scrollToY, async () => {
+      y = 700;
+      throw new Error('locate blew up');
+    });
+  } catch {
+    threw = true;
+  }
+  assert(threw === true, 'task errors still propagate');
+  assert(y === 320, 'failure still restores the original position');
+
+  const early = await withRestoredScrollY(getY, scrollToY, async () => null);
+  assert(early === null && y === 320, 'early exit restores the original position');
+
+  // The exact composition the page agent now uses: the real bounded
+  // scroll search inside the real restore wrapper.
+  let sy = 100;
+  const composed = await withRestoredScrollY(
+    () => sy,
+    (v) => {
+      sy = v;
+    },
+    async () =>
+      searchByScrolling(
+        {
+          read: () => ({ scrollY: sy, scrollHeight: 1000 }),
+          scrollDown: () => {
+            sy += 800;
+          },
+        },
+        () => (sy >= 900 ? 'mounted' : null),
+        async () => {},
+        { maxSteps: 5, stepDelayMs: 1 },
+      ),
+  );
+  assert(composed.result === 'mounted', 'scroll search still finds the target once it mounts');
+  assert(sy === 100, 'the page is put back after the composed recovery');
+}
+
+// ---------------------------------------------------------------------
+// Findings 3+4: virtualized constant-height feeds keep searching while
+// the position advances (no premature bottom), and auth-URL detection
+// ignores query-string values.
+// ---------------------------------------------------------------------
+{
+  section('Findings: constant-height feeds search on; ?next=/login is not a login wall');
+
+  // Constant height (preallocated virtualized list) with a position
+  // that keeps advancing: not the bottom, keep going to the cap.
+  let vy = 0;
+  const virtualOutcome = await searchByScrolling(
+    {
+      read: () => ({ scrollY: vy, scrollHeight: 2000 }),
+      scrollDown: () => {
+        vy += 800;
+      },
+    },
+    () => null,
+    async () => {},
+    { maxSteps: 6, stepDelayMs: 0 },
+  );
+  assert(
+    virtualOutcome.steps === 6 && virtualOutcome.reachedBottom === false,
+    `constant height with advancing position exhausts maxSteps instead of stopping early (got steps=${virtualOutcome.steps}, reachedBottom=${virtualOutcome.reachedBottom})`,
+  );
+
+  // Same constant height, but the position genuinely stops: bottom.
+  const wy = 1600;
+  const bottomedOutcome = await searchByScrolling(
+    {
+      read: () => ({ scrollY: wy, scrollHeight: 2000 }),
+      scrollDown: () => {},
+    },
+    () => null,
+    async () => {},
+    { maxSteps: 10, stepDelayMs: 0 },
+  );
+  assert(
+    bottomedOutcome.reachedBottom === true && bottomedOutcome.steps < 10,
+    `stopped position plus stable height still declares bottom early (got steps=${bottomedOutcome.steps})`,
+  );
+
+  // Finding 5: the scroll gate in runLocate honors the monitor's
+  // ORIGINAL type - a healed fingerprint must not widen recovery.
+  // Feed monitor with a missing element attempts scrolling; an
+  // originally ordinary monitor never does, observable via scrollBy.
+  async function runLocateMissing(kind: 'feed' | 'plain') {
+    const dom = new JSDOM(
+      `<!doctype html><html><head><title>Price Tracker</title></head><body>
+        <main><h1>Today's prices and market overview for every watched product category</h1>
+        <p>Fresh data lands throughout the day as suppliers report new numbers.</p></main>
+      </body></html>`,
+      { url: 'https://example.com/prices', pretendToBeVisual: true },
+    );
+    const doc = dom.window.document;
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = doc;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    let scrollCalls = 0;
+    let restoreCalls = 0;
+    (dom.window as any).scrollBy = () => {
+      scrollCalls += 1;
+    };
+    (dom.window as any).scrollTo = () => {
+      restoreCalls += 1;
+    };
+    const ghost = doc.createElement('div');
+    ghost.id = 'gone';
+    ghost.textContent = '$10.00';
+    doc.body.appendChild(ghost);
+    const baseFp = buildFingerprint(ghost, dom.window as unknown as Window);
+    ghost.remove();
+    const fp =
+      kind === 'feed'
+        ? { ...baseFp, itemAnchor: { href: '/u/status/9', isPermalink: true, rowKey: null, datetime: null, primaryText: null } }
+        : { ...baseFp, itemAnchor: null };
+    const outcome = await runLocate(JSON.stringify(fp), 'text', null, {
+      maxTotalWaitMs: kind === 'feed' ? 6000 : 2500,
+    });
+    return { outcome, scrollCalls, restoreCalls };
+  }
+
+  const feedRun = await runLocateMissing('feed');
+  assert(
+    feedRun.outcome.value === null,
+    `feed run with a missing element still reports no value (got ${JSON.stringify(feedRun.outcome.value)})`,
+  );
+  assert(feedRun.scrollCalls > 0, `feed monitor attempts scroll recovery (scrollBy calls=${feedRun.scrollCalls})`);
+  assert(feedRun.restoreCalls > 0, 'feed recovery restores scroll position afterwards');
+
+  const plainRun = await runLocateMissing('plain');
+  assert(
+    plainRun.outcome.value === null,
+    `ordinary monitor with a missing element still reports no value (got ${JSON.stringify(plainRun.outcome.value)})`,
+  );
+  assert(plainRun.scrollCalls === 0, `ordinary monitor never scrolls (scrollBy calls=${plainRun.scrollCalls})`);
+  assert(
+    plainRun.restoreCalls === 0,
+    'no recovery means no restore overhead for ordinary monitors',
+  );
+  // NOTE: the healed-anchor conjunction (`isFeedItem && ...` at the
+  // runLocate gate) is intentionally not staged here: forcing recovery
+  // to relocate onto a null-extracting feed element with >=55
+  // confidence is non-deterministic to construct, and a test that
+  // cannot reliably stage its precondition would pass vacuously.
+  // Coverage is the gate matrix above (helper contract), the two
+  // runLocate monitor-type cases here, and review of the one-line
+  // conjunction over the pre-existing isFeedItem variable.
+
+  const queryDom = new JSDOM(
+    `<!doctype html><html><head><title>Account settings</title></head><body>
+      <main><h1>Account settings</h1><p>Update your password below.</p>
+      <form><input type="password" name="pw"></form></main>
+    </body></html>`,
+    { url: 'https://example.com/account/settings?next=/login' },
+  );
+  const queryDoc = queryDom.window.document;
+  (globalThis as any).window = queryDom.window;
+  (globalThis as any).document = queryDoc;
+  (globalThis as any).Node = queryDom.window.Node;
+  assert(
+    detectAuthWall(queryDoc, false) === false,
+    'query-string /login does not classify a settings page as auth-required',
+  );
+
+  const realLogin = new JSDOM(
+    `<!doctype html><html><head><title>Sign in</title></head><body>
+      <main><form><input type="password" name="p"></form></main>
+    </body></html>`,
+    { url: 'https://example.com/login?ref=homepage' },
+  );
+  const realLoginDoc = realLogin.window.document;
+  (globalThis as any).window = realLogin.window;
+  (globalThis as any).document = realLoginDoc;
+  (globalThis as any).Node = realLogin.window.Node;
+  assert(
+    detectAuthWall(realLoginDoc, false) === true,
+    'genuine login path with a query string is still detected',
+  );
+}
+
+// ---------------------------------------------------------------------
+// M11: a password field alone is not a login wall. Ordinary pages with
+// password inputs (settings, checkout, admin) must report a missing
+// element as ELEMENT_NOT_FOUND - keeping scroll recovery available -
+// while genuine login pages (auth URL/title + password field) still
+// detect as AUTH_REQUIRED.
+// ---------------------------------------------------------------------
+{
+  section('M11: password field alone does not classify a login wall');
+
+  function authDoc(html: string, url: string) {
+    const dom = new JSDOM(html, { url });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    (globalThis as any).ShadowRoot = dom.window.ShadowRoot;
+    return { dom, doc: dom.window.document };
+  }
+
+  const settings = authDoc(
+    `<!doctype html><html><head><title>Account settings</title></head><body>
+      <main><h1>Account settings</h1><p>Update your profile and preferences below. Changes save automatically.</p>
+      <form><label>New password<input type="password" name="pw"></label></form></main>
+    </body></html>`,
+    'https://example.com/settings',
+  );
+  assert(
+    detectAuthWall(settings.doc, false) === false,
+    'settings page with a password field is not auth-required',
+  );
+
+  const login = authDoc(
+    `<!doctype html><html><head><title>Sign in</title></head><body>
+      <main><h1>Welcome back</h1><form><input type="text" name="u"><input type="password" name="p"></form></main>
+    </body></html>`,
+    'https://example.com/login',
+  );
+  assert(detectAuthWall(login.doc, false) === true, 'genuine login page is still auth-required');
+
+  const authUrl = authDoc(
+    `<!doctype html><html><head><title>Dashboard</title></head><body>
+      <main><h1>Dashboard</h1><form><input type="password" name="p"></form></main>
+    </body></html>`,
+    'https://example.com/auth/callback',
+  );
+  assert(detectAuthWall(authUrl.doc, false) === true, 'auth-looking URL is still detected');
+
+  const authTitle = authDoc(
+    `<!doctype html><html><head><title>Log in to Example</title></head><body>
+      <main><h1>Members area</h1><form><input type="password" name="p"></form></main>
+    </body></html>`,
+    'https://example.com/home',
+  );
+  assert(detectAuthWall(authTitle.doc, false) === true, 'auth-looking title is still detected');
+
+  assert(detectAuthWall(login.doc, true) === false, 'found target is never an auth wall');
+  const noPassword = authDoc(
+    `<!doctype html><html><head><title>Sign in</title></head><body><main><h1>Sign in</h1></main></body></html>`,
+    'https://example.com/login',
+  );
+  assert(detectAuthWall(noPassword.doc, false) === false, 'auth-looking page without a password field is not auth-required');
+
+  // Missing element on an ordinary page with a password field reports
+  // ELEMENT_NOT_FOUND (scroll-recovery eligible), not AUTH_REQUIRED.
+  const ghost = settings.doc.createElement('div');
+  ghost.textContent = '$1.00';
+  settings.doc.body.appendChild(ghost);
+  const ghostFp = buildFingerprint(ghost);
+  ghost.remove();
+  const missing = locateAndExtract(settings.doc, ghostFp, 'text', null);
+  assert(
+    missing.value === null && missing.diagnostic.code === 'ELEMENT_NOT_FOUND',
+    `missing element on a password-field page reports ELEMENT_NOT_FOUND (got ${missing.diagnostic.code})`,
+  );
 }
 
 console.log('\nDone.');

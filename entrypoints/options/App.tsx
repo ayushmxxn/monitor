@@ -38,7 +38,8 @@ function OptionsContent() {
   const { appInfo } = useAppInfo();
 
   async function handleIntervalChange(minutes: number) {
-    await setSettings({ ...settings, defaultIntervalMinutes: minutes });
+    const saved = await setSettings({ ...settings, defaultIntervalMinutes: minutes });
+    if (!saved) return;
     await setAllMonitorsInterval(minutes);
   }
 

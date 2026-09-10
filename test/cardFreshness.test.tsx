@@ -87,7 +87,7 @@ section('M4: card freshness stays honest across temporary failures');
     document.body.appendChild(c);
     const r = createRoot(c);
     await act(async () => {
-      r.render(<MonitorCard monitor={seedMonitor()} onDelete={() => {}} onOpen={() => {}} />);
+      r.render(<MonitorCard monitor={seedMonitor()} onDelete={async () => true} onOpen={() => {}} />);
     });
     return { container: c, root: r };
   })();
@@ -112,7 +112,7 @@ section('M4: card freshness stays honest across temporary failures');
   document.body.appendChild(c);
   const r = createRoot(c);
   await act(async () => {
-    r.render(<MonitorCard monitor={failing} onDelete={() => {}} onOpen={() => {}} />);
+    r.render(<MonitorCard monitor={failing} onDelete={async () => true} onOpen={() => {}} />);
   });
   const text = c.textContent ?? '';
   assert(text.includes('$10.00'), 'failing card preserves the last successful value exactly');
@@ -121,7 +121,7 @@ section('M4: card freshness stays honest across temporary failures');
 
   // Recovery: consecutiveFailures back to 0 restores normal freshness.
   await act(async () => {
-    r.render(<MonitorCard monitor={seedMonitor()} onDelete={() => {}} onOpen={() => {}} />);
+    r.render(<MonitorCard monitor={seedMonitor()} onDelete={async () => true} onOpen={() => {}} />);
     await sleep(20);
   });
   const recovered = c.textContent ?? '';

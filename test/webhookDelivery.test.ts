@@ -177,6 +177,19 @@ try {
   const sdt = Date.now() - s0;
   assert(sdt >= 1200, `notifyChange awaits the in-flight POST (took ${sdt}ms)`);
   assert(hits.some((h) => h.path === '/slow'), 'slow POST completed delivery before resolve');
+
+  // Finding 1: a failing settings read skips delivery silently and never
+  // fails the check (no throw, no notification attempt).
+  (settingsItem as any).getValue = async () => {
+    throw new Error('storage backend unavailable');
+  };
+  const before = notificationsCreated.length;
+  const r2 = await notifyChange(monitor, '$100.00', '$90.00', null, null);
+  assert(r2 === undefined, 'notifyChange resolves void when the settings read fails');
+  assert(
+    notificationsCreated.length === before,
+    'no notification attempted without readable settings',
+  );
 } finally {
   (settingsItem as any).getValue = origGetValue;
   if (realBrowser === undefined) delete (globalThis as any).browser;

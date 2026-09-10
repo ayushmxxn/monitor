@@ -4,7 +4,7 @@ import type { Monitor } from '@/lib/monitors/types';
 
 interface MonitorListProps {
   monitors: Monitor[];
-  onDelete: (id: string) => void;
+  onDelete: (id: string) => Promise<boolean>;
   onOpen: (id: string) => void;
   emptyAction?: React.ReactNode;
 }

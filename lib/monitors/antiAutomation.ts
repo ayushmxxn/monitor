@@ -134,10 +134,24 @@ function deepTextLength(doc: Document): number {
 /** Heuristic: does this look like a login/sign-in wall rather than the real page? */
 export function detectAuthWall(doc: Document, targetFound: boolean): boolean {
   if (targetFound) return false;
+  // A password field alone proves nothing - settings, checkout, and
+  // admin pages all have them. It stays a necessary gate (a login wall
+  // without one isn't a login wall), but only an auth-looking URL or
+  // title actually classifies. Otherwise a merely-missing element on an
+  // ordinary page is misdiagnosed AUTH_REQUIRED, which also wrongly
+  // skips the scroll-recovery path a genuine ELEMENT_NOT_FOUND gets.
   const hasPasswordField = !!doc.querySelector('input[type="password"]');
   if (!hasPasswordField) return false;
-  const url = doc.location?.href ?? '';
-  const pathLooksAuthy = /\/(login|signin|sign-in|auth|sso)(\/|$|\?)/i.test(url);
+  // Pathname only: the full href includes query values like
+  // `?next=/login`, which describe where to go next - not a login
+  // page - and must not classify.
+  let path = '';
+  try {
+    path = new URL(doc.location?.href ?? '').pathname;
+  } catch {
+    path = (doc.location?.href ?? '').split(/[?#]/)[0] ?? '';
+  }
+  const pathLooksAuthy = /\/(login|signin|sign-in|auth|sso)(\/|$|\?)/i.test(path);
   const titleLooksAuthy = /(log in|sign in|sign up|authenticate)/i.test(doc.title ?? '');
-  return pathLooksAuthy || titleLooksAuthy || hasPasswordField;
+  return pathLooksAuthy || titleLooksAuthy;
 }

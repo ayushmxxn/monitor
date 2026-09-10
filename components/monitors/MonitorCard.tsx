@@ -18,7 +18,7 @@ import { DeleteMonitorDialog } from "./DeleteMonitorDialog";
 
 interface MonitorCardProps {
   monitor: Monitor;
-  onDelete: (id: string) => void;
+  onDelete: (id: string) => Promise<boolean>;
   onOpen: (id: string) => void;
 }
 
@@ -54,9 +54,15 @@ export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen
     // Fade/scale out first, then remove from the underlying list once
     // the transition finishes - a plain CSS transition + timeout
     // stands in for what framer-motion's exit animation used to do,
-    // at a fraction of the size.
+    // at a fraction of the size. A failed delete resets the fade so
+    // the still-present card comes back instead of leaving a gap.
     setIsRemoving(true);
-    window.setTimeout(() => onDelete(monitor.id), REMOVE_TRANSITION_MS);
+    window.setTimeout(() => {
+      void (async () => {
+        const ok = await onDelete(monitor.id);
+        if (!ok) setIsRemoving(false);
+      })();
+    }, REMOVE_TRANSITION_MS);
   }, [onDelete, monitor.id]);
 
   const handleCardClick = useCallback(() => {

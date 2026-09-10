@@ -161,7 +161,7 @@ section('M5: card retry failure is visible, success stays clean');
   checkNowCalls.length = 0;
   const monitor = seedMonitor() as any;
   const { container, root } = await render(
-    <MonitorCard monitor={monitor} onDelete={() => {}} onOpen={() => {}} />,
+    <MonitorCard monitor={monitor} onDelete={async () => true} onOpen={() => {}} />,
   );
   const retry = container.querySelector('button[aria-label="Check M5 Monitor now"]');
   assert(!!retry, 'error card offers a retry button');
@@ -184,7 +184,7 @@ section('M5: card retry failure is visible, success stays clean');
   checkNowCalls.length = 0;
   const monitor = seedMonitor() as any;
   const { container, root } = await render(
-    <MonitorCard monitor={monitor} onDelete={() => {}} onOpen={() => {}} />,
+    <MonitorCard monitor={monitor} onDelete={async () => true} onOpen={() => {}} />,
   );
   await click(container.querySelector('button[aria-label="Check M5 Monitor now"]'));
   assert(checkNowCalls.length === 1, 'successful retry still runs the check (retry unchanged)');
@@ -207,7 +207,7 @@ section('M5: paused monitor offers no Check now action');
   setupDom();
   const monitor = seedMonitor({ enabled: false }) as any;
   const { container, root } = await render(
-    <MonitorCard monitor={monitor} onDelete={() => {}} onOpen={() => {}} />,
+    <MonitorCard monitor={monitor} onDelete={async () => true} onOpen={() => {}} />,
   );
   assert(
     container.querySelector('button[aria-label="Check M5 Monitor now"]') === null,

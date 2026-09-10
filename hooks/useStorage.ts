@@ -13,7 +13,7 @@ const storageCache = new Map<string, unknown>();
  */
 export function useStorage<TValue>(
   item: WxtStorageItem<TValue, Record<string, unknown>>,
-): [TValue, (value: TValue) => Promise<void>, boolean] {
+): [TValue, (value: TValue) => Promise<boolean>, boolean] {
   const [value, setValue] = useState<TValue>(() => {
     if (storageCache.has(item.key)) {
       return storageCache.get(item.key) as TValue;
@@ -65,18 +65,21 @@ export function useStorage<TValue>(
   }, [item.key]);
 
   const update = useCallback(
-    async (next: TValue) => {
+    async (next: TValue): Promise<boolean> => {
       const previous = (storageCache.has(item.key) ? storageCache.get(item.key) : item.fallback) as TValue;
       storageCache.set(item.key, next);
       setValue(next);
       try {
         await item.setValue(next);
+        return true;
       } catch (error) {
         console.error('[useStorage] Failed to set', item.key, error);
         // Revert the optimistic update so the UI never claims a change
-        // that storage rejected.
+        // that storage rejected. The boolean lets multi-write callers
+        // stop before a second write diverges from the reverted first.
         storageCache.set(item.key, previous);
         setValue(previous);
+        return false;
       }
     },
     [item],

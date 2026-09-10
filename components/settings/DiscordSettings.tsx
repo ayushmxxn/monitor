@@ -9,7 +9,7 @@ import type { AppSettings } from '@/lib/storage';
 
 interface DiscordSettingsProps {
   settings: AppSettings;
-  onChange: (next: AppSettings) => void | Promise<void>;
+  onChange: (next: AppSettings) => void | Promise<unknown>;
   disabled?: boolean;
   idPrefix: string;
 }
