@@ -4,7 +4,7 @@ import { SettingsSection } from '@/components/settings/SettingsSection';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { buildDiscordPayload, isValidDiscordWebhookUrl, postDiscordAlert } from '@/lib/monitors/discord';
+import { buildDiscordPayload, isValidDiscordWebhookUrl, testWebhookDelivery } from '@/lib/monitors/discord';
 import type { AppSettings } from '@/lib/storage';
 
 interface DiscordSettingsProps {
@@ -31,9 +31,24 @@ export function DiscordSettings({ settings, onChange, disabled, idPrefix }: Disc
       { id: 'test', name: 'Monitor test', url: 'https://example.com' } as Parameters<
         typeof buildDiscordPayload
       >[0],
-      'This is a test alert from Monitor.',
+      'Previous value',
+      'Test value',
+      {
+        hasChange: true,
+        isNumeric: true,
+        previousValue: 'Previous value',
+        currentValue: 'Test value',
+        absoluteDelta: null,
+        formattedDelta: '+$1.00',
+        percentageDelta: 10,
+        formattedPercentage: '+10.0%',
+        direction: 'increase',
+        summaryText: '',
+        fullText: '',
+      },
+      Date.now(),
     );
-    const ok = await postDiscordAlert(settings.discordWebhookUrl, payload);
+    const ok = await testWebhookDelivery(settings.discordWebhookUrl, payload);
     setTestState(ok ? 'sent' : 'failed');
   }
 

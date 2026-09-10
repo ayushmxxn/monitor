@@ -4,7 +4,7 @@ import { SettingsSection } from '@/components/settings/SettingsSection';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { buildWebhookPayload, isValidWebhookUrl, postWebhookAlert } from '@/lib/monitors/webhook';
+import { buildWebhookPayload, isValidWebhookUrl, testWebhookDelivery } from '@/lib/monitors/webhook';
 import type { AppSettings } from '@/lib/storage';
 
 interface WebhookSettingsProps {
@@ -36,7 +36,7 @@ export function WebhookSettings({ settings, onChange, disabled, idPrefix }: Webh
       'This is a test alert from Monitor.',
       Date.now(),
     );
-    const ok = await postWebhookAlert(settings.webhookUrl, payload);
+    const ok = await testWebhookDelivery(settings.webhookUrl, payload);
     setTestState(ok ? 'sent' : 'failed');
   }
 

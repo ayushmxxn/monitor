@@ -10,6 +10,7 @@ import {
   checkAllMonitorsNow,
 } from '@/lib/monitors/scheduler';
 import { checkMonitor, checkMonitorById } from '@/lib/monitors/checker';
+import { deliverTestAlert } from '@/lib/monitors/testDelivery';
 import { getMonitor } from '@/lib/monitors/store';
 import { runPickerFlow } from '@/lib/monitors/pickerFlow';
 
@@ -90,6 +91,8 @@ function registerMessageHandlers(): void {
     );
     return Object.fromEntries(entries);
   });
+
+  onMessage('testWebhookDelivery', async ({ data }) => deliverTestAlert(data));
 }
 
 /**

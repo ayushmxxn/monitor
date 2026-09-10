@@ -188,6 +188,18 @@ export function normalizeText(text: string): string {
   return text.trim().replace(/\s+/g, ' ');
 }
 
+/**
+ * True when text carries no visible characters at all - empty,
+ * whitespace-only, or only zero-width/format characters (`\u200b` etc.
+ * survive both `trim()` and `\s`, so a bare check would treat them as
+ * content). Such text is never a value; callers use this to keep
+ * invisible-only runs from becoming extracted values that the settle
+ * loop would then confirm and lock in instead of waiting for real text.
+ */
+export function isEffectivelyEmpty(text: string): boolean {
+  return normalizeText(text).replace(/[\u200b-\u200d\u2060]/g, '') === '';
+}
+
 /** Recognized naming conventions for a visually-hidden/screen-reader-only element. Only a fallback signal - see `isVisuallyHidden`. */
 const SR_ONLY_CLASS_RE =
   /(^|\s)(sr-only|visually-hidden|screen-reader-only|screenreader-only|a11y-hidden|visuallyhidden|assistive-text|offscreen)(\s|$)/i;
@@ -262,21 +274,34 @@ export function isVisuallyHidden(el: Element): boolean {
  */
 export function extractVisibleText(root: Element): string {
   const parts: string[] = [];
+  // Text skipped as hidden: the aria-label fallback below exists for
+  // content that IS there but hidden (e.g. an aria-hidden digit strip
+  // described by the label) - never for a truly empty element, where
+  // the label would masquerade as a value instead of letting the
+  // caller wait for real text.
+  let skippedHiddenLength = 0;
 
   function walk(node: Node): void {
     if (node.nodeType === 3) {
-      parts.push(node.textContent ?? '');
+      const t = node.textContent ?? '';
+      if (!t || isEffectivelyEmpty(t)) return;
+      parts.push(t);
       return;
     }
     if (node.nodeType !== 1) return;
     const el = node as Element;
-    if (isVisuallyHidden(el)) return;
+    if (isVisuallyHidden(el)) {
+      skippedHiddenLength += normalizeText(el.textContent ?? '').length;
+      return;
+    }
     for (const child of Array.from(node.childNodes)) walk(child);
   }
 
   walk(root);
   const text = normalizeText(parts.join(' '));
   if (text) return text;
+
+  if (skippedHiddenLength === 0) return '';
 
   const ariaLabel = root.getAttribute('aria-label');
   if (ariaLabel) {

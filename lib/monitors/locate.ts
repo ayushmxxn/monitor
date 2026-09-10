@@ -1,4 +1,4 @@
-import { locateElement, buildFingerprint, normalizeText, isVisuallyHidden, extractVisibleText, type ElementFingerprint, type TextAnchor } from './fingerprint';
+import { locateElement, buildFingerprint, normalizeText, isEffectivelyEmpty, isVisuallyHidden, extractVisibleText, type ElementFingerprint, type TextAnchor } from './fingerprint';
 import { detectAntiAutomation, detectAuthWall } from './antiAutomation';
 import { diagnostic, type Diagnostic } from './diagnostics';
 import { withExponentialBackoff, sleep, type ReadinessResult } from './readiness';
@@ -197,6 +197,55 @@ export function locateAndExtract(
     };
   }
 
+  // A relocated element must yield the same KIND of value the monitor
+  // was picked for: recovery scores structure, not meaning, so without
+  // this a structurally identical neighbor (a delta like "+5.2%" next
+  // to a count like "20") can win and its value gets stored - and then
+  // self-healed onto, permanently hijacking the monitor. Exact matches
+  // are exempt (a page legitimately restyles its own value in place),
+  // as are text monitors (no kind to agree with). Rejection preserves
+  // the last value and retries instead of storing the wrong one - and
+  // crucially never heals toward the mismatched element.
+  const anchorKind =
+    anchorSemantic !== null &&
+    anchorSemantic.type !== 'text' &&
+    anchorSemantic.normalized !== null
+      ? anchorSemantic.type
+      : null;
+  const resolvedKind =
+    resolvedSemantic !== null &&
+    resolvedSemantic.type !== 'text' &&
+    resolvedSemantic.normalized !== null
+      ? resolvedSemantic.type
+      : null;
+  const kindMismatch =
+    !wasExactMatch &&
+    value !== null &&
+    anchorKind !== null &&
+    resolvedKind !== null &&
+    anchorKind !== resolvedKind;
+  // A reading that merely echoes the anchor's own frame (its before or
+  // after context) without containing the anchored value is surrounding
+  // context masquerading as the value - e.g. a slot now holding the old
+  // label or delta. Unlike kindMismatch this also applies to exact
+  // matches: positional certainty says *where*, but frame-echo says the
+  // slot no longer holds the metric, and storing context as a reading
+  // is never right.
+  const frameEcho = value !== null && isFrameEcho(fp.textAnchor, value);
+  if (kindMismatch || frameEcho) {
+    const detail = kindMismatch
+      ? `relocated value is ${resolvedKind}, expected ${anchorKind} like "${fp.textAnchor?.value ?? ''}"`
+      : `extracted text repeats the anchor frame instead of its value ("${value}")`;
+    return {
+      value: null,
+      diagnostic: diagnostic('SELECTOR_RECOVERY_LOW_CONFIDENCE', detail),
+      updatedFingerprint: null,
+      confidence: result.score,
+      method: result.method,
+      semanticValue: null,
+    };
+  }
+
   const code = wasExactMatch ? 'OK' : 'OK_RECOVERED';
   const detail = wasExactMatch
     ? undefined
@@ -293,6 +342,26 @@ function isOrderedCandidate(
 }
 
 /**
+ * True when `text` merely echoes the anchor's own frame (its before or
+ * after context) without containing the anchored value: surrounding
+ * context masquerading as the value. That happens when a slot now
+ * holds old context instead of the metric - a relabeled row, a delta
+ * sitting where the value was, a label left behind after its value
+ * unmounted. Returning such text stores context as if it were a
+ * reading; rejecting (null) preserves the last value and retries.
+ * Only exact frame equality counts (both sides normalized), and text
+ * containing the anchor value itself always passes - so genuine
+ * updates, reshaped elements, and label monitors are unaffected.
+ */
+function isFrameEcho(anchor: TextAnchor | null | undefined, text: string): boolean {
+  if (!anchor || !text) return false;
+  const echoesFrame =
+    (!!anchor.before && text === anchor.before) || (!!anchor.after && text === anchor.after);
+  if (!echoesFrame) return false;
+  return !(anchor.value && text.includes(anchor.value));
+}
+
+/**
  * Prefer the exact text node/range that was clicked. If a framework has
  * replaced that text node, a single visible text run remains a safe dynamic
  * replacement (e.g. 147 → 150); when a multi-value container becomes
@@ -364,19 +433,27 @@ export { extractVisibleText } from './fingerprint';
 
 function visibleTextRuns(root: Element): string[] {
   const runs: string[] = [];
+  // See `extractVisibleText` in fingerprint.ts: the aria-label fallback
+  // covers hidden content described by the label, never a truly empty
+  // element (whose label would otherwise be stored as a successful
+  // value instead of letting the check wait for real text).
+  let skippedHiddenLength = 0;
   function walk(node: Node): void {
     if (node.nodeType === 3) {
       const text = normalizeText(node.textContent ?? '');
-      if (text) runs.push(text);
+      if (text && !isEffectivelyEmpty(text)) runs.push(text);
       return;
     }
     if (node.nodeType !== 1) return;
     const el = node as Element;
-    if (isVisuallyHidden(el)) return;
+    if (isVisuallyHidden(el)) {
+      skippedHiddenLength += normalizeText(el.textContent ?? '').length;
+      return;
+    }
     for (const child of Array.from(node.childNodes)) walk(child);
   }
   walk(root);
-  if (runs.length === 0) {
+  if (runs.length === 0 && skippedHiddenLength > 0) {
     const ariaLabel = root.getAttribute('aria-label');
     if (ariaLabel) {
       const normalized = normalizeText(ariaLabel);

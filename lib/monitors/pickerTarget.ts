@@ -380,13 +380,23 @@ function findNumericCandidates(
     let score = baseScore;
 
     // Bonus for metric label before (only when not part of a comparison/range between multiple values)
-    if (!isComparisonText && /\b(likes?|balance|total|price|cost|amount|rate|score|views?|followers?|subscribers?|subs?|points?|pts?|stock|rating|rev(?:enue)?)\b[:\s(]*$/i.test(before)) {
+    if (!isComparisonText && /\b(likes?|balance|total|price|cost|amount|rate|score|views?|visits?|visitors?|pageviews?|sessions?|bounces?|followers?|subscribers?|subs?|points?|pts?|stock|rating|rev(?:enue)?)\b[:\s(]*$/i.test(before)) {
       score += 30;
     }
 
     // Bonus for metric unit after (only when not part of a comparison/range between multiple values)
     if (!isComparisonText && /^[:\s)]*(pts?|points?|likes?|views?|subs?|subscribers?|followers?|shares?|upvotes?|votes?|items?|units?|stars?|comments?)\b/i.test(after)) {
       score += 25;
+    }
+
+    // Demotion for an explicitly signed percentage (+5.2%, -4.5%): on
+    // analytics dashboards this shape is almost always a change
+    // indicator annotating a nearby metric, not the metric itself. It
+    // stays fully eligible on its own (single candidate) and keeps its
+    // relative order against other signed deltas - it only loses to an
+    // unsigned value it would otherwise tie or narrowly beat.
+    if (/^[+-]/.test(trimmed) && semantic.type === 'percentage') {
+      score -= 25;
     }
 
     // Penalty for index, rank, time or secondary limiter context

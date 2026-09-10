@@ -126,9 +126,29 @@ assert(isValidDiscordWebhookUrl('https://discord.com/api/webhooks/123') === fals
 
 const discordPayload = buildDiscordPayload(
   { id: 'm1', name: 'BTC price', url: 'https://example.com/item' } as Parameters<typeof buildDiscordPayload>[0],
-  '$90.00 → $100.00 (+$10.00)',
+  '$90.00',
+  '$100.00',
+  {
+    hasChange: true,
+    isNumeric: true,
+    previousValue: '$90.00',
+    currentValue: '$100.00',
+    absoluteDelta: 10,
+    formattedDelta: '+$10.00',
+    percentageDelta: 11.1,
+    formattedPercentage: '+11.1%',
+    direction: 'increase',
+    summaryText: '+$10.00 (+11.1%)',
+    fullText: '$90.00 → $100.00 (+$10.00, +11.1%)',
+  },
+  Date.now(),
 );
-assert(typeof discordPayload.content === 'string' && discordPayload.content.includes('BTC price'), 'content carries monitor details');
+assert(
+  Array.isArray(discordPayload.embeds) && discordPayload.embeds.length === 1,
+  'payload is exactly one embed',
+);
+assert(!('content' in discordPayload), 'no raw content field');
+assert(discordPayload.embeds[0].title.includes('BTC price'), 'embed title carries monitor details');
 assert(discordPayload.allowed_mentions.parse.length === 0, 'mentions suppressed');
 
 assert((await postDiscordAlert('not-a-url', discordPayload)) === false, 'invalid discord URL resolves false');

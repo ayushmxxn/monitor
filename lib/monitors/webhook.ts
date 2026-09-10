@@ -1,4 +1,5 @@
 import type { Monitor } from './types';
+import { sendMessage, withTimeout } from '@/lib/messaging';
 
 /** How long a single webhook POST may take before it is aborted. */
 export const WEBHOOK_TIMEOUT_MS = 8000;
@@ -70,5 +71,26 @@ export async function postWebhookAlert(url: string, payload: WebhookAlertPayload
     return false;
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+/** Upper bound for a manual Test action (poster timeout plus messaging round-trip). */
+const TEST_DELIVERY_TIMEOUT_MS = 15_000;
+
+/**
+ * Sends one test alert via the background worker instead of POSTing
+ * from the caller: panel content scripts run under the page's origin
+ * and CSP, which can block the identical request the background
+ * worker delivers fine. Same boolean contract as `postWebhookAlert`;
+ * never throws.
+ */
+export async function testWebhookDelivery(url: string, payload: WebhookAlertPayload): Promise<boolean> {
+  try {
+    return await withTimeout(
+      sendMessage('testWebhookDelivery', { kind: 'generic', url, payload }),
+      TEST_DELIVERY_TIMEOUT_MS,
+    );
+  } catch {
+    return false;
   }
 }

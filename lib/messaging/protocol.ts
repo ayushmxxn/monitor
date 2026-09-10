@@ -12,6 +12,7 @@
 import type { ElementFingerprint } from '@/lib/monitors/fingerprint';
 import type { Diagnostic } from '@/lib/monitors/diagnostics';
 import type { SemanticValue } from '@/lib/monitors/semanticValue';
+import type { TestDeliveryInput } from '@/lib/monitors/testDelivery';
 
 export interface ProtocolMap {
   /** Liveness check. Used by the UI to confirm the background worker is running. */
@@ -81,6 +82,15 @@ export interface ProtocolMap {
    * relayed through the background worker.
    */
   checkOriginPermissions(urls: string[]): Record<string, boolean>;
+
+  /**
+   * Sends one test alert through the background worker - the same
+   * context real alerts post from. Test buttons in the panel content
+   * script must use this instead of POSTing directly: a panel fetch
+   * runs under the page's origin and CSP, so strict pages block it
+   * even for valid URLs.
+   */
+  testWebhookDelivery(input: TestDeliveryInput): boolean;
 }
 
 export interface ParseHtmlInput {

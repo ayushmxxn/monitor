@@ -65,7 +65,7 @@ export async function notifyChange(
   }
 
   if (settings.discordEnabled && isValidDiscordWebhookUrl(settings.discordWebhookUrl)) {
-    const payload = buildDiscordPayload(monitor, message);
+    const payload = buildDiscordPayload(monitor, prev, newValue, change, Date.now());
     deliveries.push(postDiscordAlert(settings.discordWebhookUrl, payload));
   }
 

@@ -3898,6 +3898,49 @@ section('Selection reliability: identify intended value and clearly indicate amb
   assert(multiMetricTarget.isAmbiguous === true, 'multi-metric element flags isAmbiguous = true');
   assert(formatPickerTooltip(multiMetricTarget).startsWith('⚠ Ambiguous'), 'multi-metric tooltip indicates ambiguity');
 
+  // 2b. Analytics dashboards (Umami / Cloudflare style): a metric value
+  // with its comparison delta in one element. The label-associated
+  // metric wins over the signed change indicator, which is demoted as
+  // secondary by semantics - while genuinely ambiguous inputs above
+  // stay rejected.
+  const analyticsDom = new JSDOM(`<!doctype html><html><body>
+    <div id="umami-card"><span class="stat-label">Visits</span><span class="stat-value">1,234</span><span class="stat-change">+5.2%</span></div>
+    <div id="umami-visitors"><span class="stat-label">Visitors</span><span class="stat-value">342</span><span class="stat-change">+12</span></div>
+    <div id="cf-metric">Unique visitors 935 +5.2%</div>
+    <div id="cf-cell">1.44k <span>+2.1%</span></div>
+    <div id="battery-stat">Battery 87% (+5%)</div>
+    <div id="neg-delta">-4.5%</div>
+  </body></html>`);
+  const adoc = analyticsDom.window.document;
+  (globalThis as any).window = analyticsDom.window;
+  (globalThis as any).document = adoc;
+  (globalThis as any).Node = analyticsDom.window.Node;
+  (globalThis as any).CSS = analyticsDom.window.CSS ?? { escape: (s: string) => s };
+
+  const umamiCard = resolvePickerTarget(adoc.querySelector('#umami-card')!)!;
+  assert(umamiCard.canonicalValue === '1,234', `Umami visits card resolves "1,234", not the delta (got ${JSON.stringify(umamiCard.canonicalValue)})`);
+  assert(umamiCard.isAmbiguous === false, 'Umami visits card is not ambiguous');
+
+  const umamiVisitors = resolvePickerTarget(adoc.querySelector('#umami-visitors')!)!;
+  assert(umamiVisitors.canonicalValue === '342', `Umami visitors card resolves "342" (got ${JSON.stringify(umamiVisitors.canonicalValue)})`);
+  assert(umamiVisitors.isAmbiguous === false, 'Umami visitors card is not ambiguous');
+
+  const cfMetric = resolvePickerTarget(adoc.getElementById('cf-metric')!)!;
+  assert(cfMetric.canonicalValue === '935', `Cloudflare metric resolves "935", not the delta (got ${JSON.stringify(cfMetric.canonicalValue)})`);
+  assert(cfMetric.isAmbiguous === false, 'Cloudflare metric is not ambiguous');
+
+  const cfCell = resolvePickerTarget(adoc.querySelector('#cf-cell')!)!;
+  assert(cfCell.canonicalValue === '1.44k', `Cloudflare cell resolves "1.44k", not the delta (got ${JSON.stringify(cfCell.canonicalValue)})`);
+  assert(cfCell.isAmbiguous === false, 'Cloudflare cell is not ambiguous');
+
+  const batteryTarget = resolvePickerTarget(adoc.getElementById('battery-stat')!)!;
+  assert(batteryTarget.canonicalValue === '87%', `battery stat resolves "87%", not the delta (got ${JSON.stringify(batteryTarget.canonicalValue)})`);
+  assert(batteryTarget.isAmbiguous === false, 'battery stat is not ambiguous');
+
+  const negDelta = resolvePickerTarget(adoc.getElementById('neg-delta')!)!;
+  assert(negDelta.canonicalValue === '-4.5%', `lone signed value still resolves (got ${JSON.stringify(negDelta.canonicalValue)})`);
+  assert(negDelta.isAmbiguous === false, 'lone signed value is not ambiguous');
+
   // 3. Disambiguation via cursor range positioning (Range-first hit testing)
   const scoreTextNode = scoreEl.firstChild as Text;
   // Position range over "90" (offset 13 in "Score 85 vs 90")
@@ -5659,6 +5702,180 @@ section('Scenario 32: Historical benchmarks and deal insights');
     missing.value === null && missing.diagnostic.code === 'ELEMENT_NOT_FOUND',
     `missing element on a password-field page reports ELEMENT_NOT_FOUND (got ${missing.diagnostic.code})`,
   );
+}
+
+// ---------------------------------------------------------------------
+// Analytics value hijack: a saved "Visits 20" monitor must never come
+// back with the nearby delta percentage. Pick resolves the value span
+// (as in the product screenshot: "✓ 20"); if a later check can only
+// recover onto the structurally similar delta span, the type mismatch
+// (percentage vs number) rejects it instead of storing - and, most
+// importantly, never heals the fingerprint onto the wrong element,
+// which is what used to wedge monitors onto the percentage forever.
+// ---------------------------------------------------------------------
+{
+  section('Analytics hijack: relocated delta percentage is rejected, never stored or healed');
+
+  const hijackDom = new JSDOM(
+    `<!doctype html><html><head><title>Cloudflare Dashboard</title></head><body>
+      <main><h1>Web traffic analytics and performance overview</h1>
+      <p>Review visits, page views, and unique visitor counts across all zones.</p>
+      <div id="card"><div class="card"><span class="label">Visits</span><span class="value" data-metric="visits">20</span><span class="delta" data-metric="visits">54.55%</span></div></div>
+      <footer><p>Footer content with plenty of ordinary descriptive text here.</p></footer>
+    </body></html>`,
+    { url: 'https://dash.cloudflare.com/', pretendToBeVisual: true },
+  );
+  const hijackDoc = hijackDom.window.document;
+  (globalThis as any).window = hijackDom.window;
+  (globalThis as any).document = hijackDoc;
+  (globalThis as any).Node = hijackDom.window.Node;
+  (globalThis as any).CSS = hijackDom.window.CSS ?? { escape: (s: string) => s };
+  (globalThis as any).ShadowRoot = hijackDom.window.ShadowRoot;
+  const hijackWin = hijackDom.window as unknown as Window;
+
+  // Pick with the cursor on the value, like the real flow: unambiguous "✓ 20".
+  const valueSpan = hijackDoc.querySelector('#card .value')!;
+  const valueText = valueSpan.firstChild!;
+  (hijackDoc as any).caretRangeFromPoint = () => {
+    const range = hijackDoc.createRange();
+    range.setStart(valueText, 1);
+    range.collapse(true);
+    return range;
+  };
+  const picked = resolvePickerTargetAtPoint(hijackDoc, 10, 10);
+  assert(picked !== null, 'cursor pick resolves the Visits value');
+  assert(picked!.canonicalValue === '20', `picked canonical value is "20" (got ${JSON.stringify(picked!.canonicalValue)})`);
+  assert(picked!.isAmbiguous === false, 'cursor pick is not ambiguous');
+  const visitsFp = buildFingerprint(valueSpan, hijackWin, picked!.textAnchor);
+
+  // Same content, fresh nodes: the value is still extracted.
+  hijackDoc.getElementById('card')!.innerHTML =
+    `<div class="card"><span class="label">Visits</span><span class="value" data-metric="visits">20</span><span class="delta" data-metric="visits">54.55%</span></div>`;
+  const steady = locateAndExtract(hijackDoc, visitsFp, 'text', null, hijackWin);
+  assert(steady.value === '20', `recheck with the value present extracts "20" (got ${JSON.stringify(steady.value)})`);
+
+  // Value span gone (not mounted at check time); only the structurally
+  // similar delta remains and recovery lands on it with confidence.
+  hijackDoc.getElementById('card')!.innerHTML =
+    `<div class="card"><span class="value" data-metric="visits">54.55%</span><span class="label">Visits</span></div>`;
+  const hijacked = locateAndExtract(hijackDoc, visitsFp, 'text', null, hijackWin);
+  assert(
+    hijacked.value === null,
+    `relocated delta percentage is rejected, not stored (got ${JSON.stringify(hijacked.value)})`,
+  );
+  assert(
+    hijacked.diagnostic.code === 'SELECTOR_RECOVERY_LOW_CONFIDENCE',
+    `rejection reports low confidence, not success (got ${hijacked.diagnostic.code})`,
+  );
+  assert(
+    hijacked.updatedFingerprint === null,
+    'rejection never heals the fingerprint onto the wrong element',
+  );
+  assert(
+    hijacked.semanticValue === null,
+    'rejection carries no semantic value to poison downstream state',
+  );
+}
+
+// ---------------------------------------------------------------------
+// Empty-target population: an already-located element with temporarily
+// empty (or effectively empty) text must be re-read until it holds a
+// real value - never instantly succeed with an aria-label or invisible
+// characters. Persistent emptiness still fails as EXTRACTION_EMPTY.
+// ---------------------------------------------------------------------
+{
+  section('Empty target waits for population within budget');
+
+  function emptyDoc(inner: string) {
+    const dom = new JSDOM(
+      `<!doctype html><html><head><title>Shop Deals Page</title></head><body>
+      <header><nav><a href="/">Home</a><a href="/deals">Deals</a><a href="/cart">Cart</a></nav></header>
+      <main><h1>Today's deals and price drops across every department</h1>${inner}</main>
+      <footer><p>Footer with ordinary descriptive text for the layout.</p></footer>
+      </body></html>`,
+      { url: 'https://example.com/deals', pretendToBeVisual: true },
+    );
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    (globalThis as any).ShadowRoot = dom.window.ShadowRoot;
+    return { dom, doc: dom.window.document };
+  }
+
+  function settleRead(
+    dom: JSDOM,
+    doc: Document,
+    fp: ElementFingerprint,
+    budgetMs: number,
+  ) {
+    return resolveSettledValue(
+      (maxWaitMs) => waitForPageReady(dom.window as unknown as Window, { maxWaitMs, minWaitMs: 50 }),
+      () => locateAndExtract(doc, fp, 'text', null),
+      { maxTotalWaitMs: budgetMs, confirmDelayMs: 200 },
+    );
+  }
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  // 1. Numeric monitor picked while populated; empty with an aria-label
+  // at check time; repopulates mid-budget. The label must never stand
+  // in for the value.
+  {
+    const { dom, doc } = emptyDoc(`<div id="p"><span class="lbl">Price: </span><span class="price" aria-label="current price">$49.99</span></div>`);
+    const el = doc.querySelector('.price')!;
+    const fp = buildFingerprint(el, dom.window as unknown as Window);
+    el.textContent = '';
+    await sleep(100);
+    setTimeout(() => {
+      el.textContent = '$44.99';
+    }, 700);
+    const out = await settleRead(dom, doc, fp, 5000);
+    assert(out.value === '$44.99', `empty numeric target converges on repopulated value (got ${JSON.stringify(out.value)})`);
+    assert(out.semanticValue?.type === 'currency', `repopulated value keeps numeric semantics (got ${out.semanticValue?.type})`);
+  }
+
+  // 2. Zero-width-only content is empty, not a value - waited out too.
+  {
+    const { dom, doc } = emptyDoc(`<div id="p"><span class="price"></span></div>`);
+    const el = doc.querySelector('.price')!;
+    el.textContent = String.fromCharCode(0x200b);
+    const fp = buildFingerprint(el, dom.window as unknown as Window);
+    setTimeout(() => {
+      el.textContent = '$49.99';
+    }, 700);
+    const out = await settleRead(dom, doc, fp, 5000);
+    assert(out.value === '$49.99', `zero-width-only target waits for real text (got ${JSON.stringify(out.value)})`);
+  }
+
+  // 3. Text monitor on an empty element with an aria-label: label is
+  // not stored either.
+  {
+    const { dom, doc } = emptyDoc(`<div id="p"><span class="status" aria-label="stock status"></span></div>`);
+    const el = doc.querySelector('.status')!;
+    const fp = buildFingerprint(el, dom.window as unknown as Window);
+    setTimeout(() => {
+      el.textContent = 'In Stock';
+    }, 700);
+    const out = await settleRead(dom, doc, fp, 5000);
+    assert(out.value === 'In Stock', `empty text target converges instead of storing its aria-label (got ${JSON.stringify(out.value)})`);
+  }
+
+  // 4. Never populates: still fails honestly and within budget.
+  {
+    const { dom, doc } = emptyDoc(`<div id="p"><span class="price" aria-label="current price"></span></div>`);
+    const el = doc.querySelector('.price')!;
+    const fp = buildFingerprint(el, dom.window as unknown as Window);
+    const start = Date.now();
+    const out = await settleRead(dom, doc, fp, 2500);
+    assert(out.value === null, `persistently empty target yields null (got ${JSON.stringify(out.value)})`);
+    assert(
+      out.diagnostic.code === 'EXTRACTION_EMPTY',
+      `persistently empty target reports EXTRACTION_EMPTY (got ${out.diagnostic.code})`,
+    );
+    assert(Date.now() - start < 4500, `empty failure stays bounded by its budget (took ${Date.now() - start}ms)`);
+  }
 }
 
 console.log('\nDone.');
