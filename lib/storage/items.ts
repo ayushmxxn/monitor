@@ -90,11 +90,12 @@ function safeDefineItem<T>(
  */
 export const settingsItem = safeDefineItem<AppSettings>(STORAGE_KEYS.settings, {
   fallback: DEFAULT_SETTINGS,
-  version: 4,
+  version: 5,
   migrations: {
     2: (stored: unknown) => ({ ...DEFAULT_SETTINGS, ...(stored as Partial<AppSettings>) }),
     3: (stored: unknown) => ({ ...DEFAULT_SETTINGS, ...(stored as Partial<AppSettings>) }),
     4: (stored: unknown) => ({ ...DEFAULT_SETTINGS, ...(stored as Partial<AppSettings>) }),
+    5: (stored: unknown) => ({ ...DEFAULT_SETTINGS, ...(stored as Partial<AppSettings>) }),
   },
 });
 

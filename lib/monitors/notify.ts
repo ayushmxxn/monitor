@@ -4,6 +4,7 @@ import type { SemanticValue } from './semanticValue';
 import { calculateValueChange, formatChangeAlertMessage } from './changeSummary';
 import { buildWebhookPayload, isValidWebhookUrl, postWebhookAlert } from './webhook';
 import { buildDiscordPayload, isValidDiscordWebhookUrl, postDiscordAlert } from './discord';
+import { buildTelegramMessage, isValidTelegramBotToken, isValidTelegramChatId, sendTelegramAlert } from './telegram';
 
 /**
  * Single alert fan-out for a confirmed, condition-matched value change.
@@ -67,6 +68,15 @@ export async function notifyChange(
   if (settings.discordEnabled && isValidDiscordWebhookUrl(settings.discordWebhookUrl)) {
     const payload = buildDiscordPayload(monitor, prev, newValue, change, Date.now());
     deliveries.push(postDiscordAlert(settings.discordWebhookUrl, payload));
+  }
+
+  if (
+    settings.telegramEnabled &&
+    isValidTelegramBotToken(settings.telegramBotToken) &&
+    isValidTelegramChatId(settings.telegramChatId)
+  ) {
+    const text = buildTelegramMessage(monitor, prev, newValue, change);
+    deliveries.push(sendTelegramAlert(settings.telegramBotToken, settings.telegramChatId, text));
   }
 
   // Awaited (not fire-and-forget) for the lifetime reason above.

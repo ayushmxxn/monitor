@@ -11,6 +11,7 @@ import {
 import { SettingsSection } from "@/components/settings/SettingsSection";
 import { WebhookSettings } from "@/components/settings/WebhookSettings";
 import { DiscordSettings } from "@/components/settings/DiscordSettings";
+import { TelegramSettings } from "@/components/settings/TelegramSettings";
 import { SiteAccessSection } from "@/components/settings/SiteAccessSection";
 import { Button } from "@/components/ui/button";
 import { useAppInfo } from "@/hooks/useAppInfo";
@@ -103,6 +104,13 @@ function OptionsContent() {
         />
 
         <DiscordSettings
+          settings={settings}
+          onChange={setSettings}
+          disabled={isLoading}
+          idPrefix="options"
+        />
+
+        <TelegramSettings
           settings={settings}
           onChange={setSettings}
           disabled={isLoading}

@@ -3,6 +3,7 @@ import { SettingRow, SettingSelectRow, SettingLinkRow, SettingActionRow } from '
 import { SettingsSection } from '@/components/settings/SettingsSection';
 import { WebhookSettings } from '@/components/settings/WebhookSettings';
 import { DiscordSettings } from '@/components/settings/DiscordSettings';
+import { TelegramSettings } from '@/components/settings/TelegramSettings';
 import { ClearAllMonitorsDialog } from '@/components/settings/ClearAllMonitorsDialog';
 import { useStorage } from '@/hooks/useStorage';
 import { settingsItem, monitorsItem } from '@/lib/storage/items';
@@ -70,6 +71,13 @@ export function PanelSettings() {
       />
 
       <DiscordSettings
+        settings={settings}
+        onChange={setSettings}
+        disabled={isSettingsLoading}
+        idPrefix="panel"
+      />
+
+      <TelegramSettings
         settings={settings}
         onChange={setSettings}
         disabled={isSettingsLoading}

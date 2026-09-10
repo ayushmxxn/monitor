@@ -6,7 +6,7 @@
  * state at a glance and to reason about migrations as fields are added.
  */
 
-export const SETTINGS_SCHEMA_VERSION = 4;
+export const SETTINGS_SCHEMA_VERSION = 5;
 
 export type Theme = 'light' | 'dark';
 
@@ -42,6 +42,16 @@ export interface AppSettings {
   discordEnabled: boolean;
   /** Discord channel webhook URL. Only used when `discordEnabled` is true. */
   discordWebhookUrl: string;
+  /**
+   * Whether monitor alerts are also sent via a user-configured Telegram
+   * bot. Independent of every other channel. Defaults to off so nothing
+   * ever leaves the device unless the user explicitly opts in.
+   */
+  telegramEnabled: boolean;
+  /** Bot token for the Telegram Bot API. Only used when `telegramEnabled` is true. */
+  telegramBotToken: string;
+  /** Chat ID receiving Telegram alerts. Only used when `telegramEnabled` is true. */
+  telegramChatId: string;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -53,4 +63,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   webhookUrl: '',
   discordEnabled: false,
   discordWebhookUrl: '',
+  telegramEnabled: false,
+  telegramBotToken: '',
+  telegramChatId: '',
 };
