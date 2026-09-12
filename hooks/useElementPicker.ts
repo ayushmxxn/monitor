@@ -27,7 +27,11 @@ export interface UseElementPickerResult {
  * the user staring at a page with no confirmation anything happened.
  */
 export function useElementPicker(
-  onFinished?: (result: { saved: boolean; monitorName: string | null }) => void,
+  onFinished?: (result: {
+    saved: boolean;
+    monitorName: string | null;
+    monitorId?: string | null;
+  }) => void,
 ): UseElementPickerResult {
   const [state, setState] = useState<ElementPickerState>('idle');
   const [error, setError] = useState<string | null>(null);

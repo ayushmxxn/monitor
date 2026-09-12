@@ -5878,6 +5878,168 @@ section('Scenario 32: Historical benchmarks and deal insights');
   }
 }
 
+// ---------------------------------------------------------------------
+// Metric/change separation: an analytics card holds its metric and its
+// signed change indicator in the SAME element ("Unique visitors 935
+// +5.2%"). When the delta updates, the text anchor's after-frame goes
+// stale and extraction falls back to the element's whole text - where
+// the generic detector takes whichever token comes first, very often
+// the delta, and stores it as the metric. Extraction instead prefers
+// the single token matching the anchored value's own kind and sign
+// shape (exactly one, never a guess between several), and a relocated
+// element showing only the same-kind delta fails safely instead of
+// hijacking the monitor.
+// ---------------------------------------------------------------------
+{
+  section('Metric/change separation: same-element updates keep the metric, delta-only recovery fails safe');
+
+  function metricDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`);
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    (globalThis as any).ShadowRoot = dom.window.ShadowRoot;
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  // 1. Delta-first ordering, same kind (percentage metric + signed delta).
+  {
+    const { doc } = metricDoc(`<div id="card">(+5%) Battery 87%</div>`);
+    const el = doc.getElementById('card')!;
+    const target = resolvePickerTarget(el)!;
+    assert(target.canonicalValue === '87%', `picker resolves the metric "87%", not the delta (got ${JSON.stringify(target.canonicalValue)})`);
+    assert(target.isAmbiguous === false, 'metric-first pick is not ambiguous');
+    const fp = buildFingerprint(target.element, undefined, target.textAnchor);
+    el.textContent = '(+6%) Battery 88%';
+    const out = locateAndExtract(doc, fp, 'text', null);
+    assert(
+      out.value === '88%',
+      `same-element update extracts the metric "88%", never the delta "+6%" (got ${JSON.stringify(out.value)}, diagnostic ${out.diagnostic.code})`,
+    );
+  }
+
+  // 2. Metric-first ordering, cross-kind (count metric + signed delta).
+  {
+    const { doc } = metricDoc(`<div id="m">Unique visitors 935 +5.2%</div>`);
+    const el = doc.getElementById('m')!;
+    const target = resolvePickerTarget(el)!;
+    assert(target.canonicalValue === '935', `picker resolves "935" (got ${JSON.stringify(target.canonicalValue)})`);
+    const fp = buildFingerprint(target.element, undefined, target.textAnchor);
+    el.textContent = 'Unique visitors 1002 +6.1%';
+    const out = locateAndExtract(doc, fp, 'text', null);
+    assert(
+      out.value === '1002',
+      `same-element update extracts "1002", never the delta "+6.1%" (got ${JSON.stringify(out.value)}, diagnostic ${out.diagnostic.code})`,
+    );
+  }
+
+  // 3. Abbreviated metric + delta.
+  {
+    const { doc } = metricDoc(`<div id="c">1.44k <span>+2.1%</span></div>`);
+    const el = doc.getElementById('c')!;
+    const target = resolvePickerTarget(el)!;
+    assert(target.canonicalValue === '1.44k', `picker resolves "1.44k" (got ${JSON.stringify(target.canonicalValue)})`);
+    const fp = buildFingerprint(target.element, undefined, target.textAnchor);
+    el.innerHTML = '1.50k <span>+3.4%</span>';
+    const out = locateAndExtract(doc, fp, 'text', null);
+    assert(
+      out.value === '1.50k',
+      `abbreviated metric update extracts "1.50k", never "+3.4%" (got ${JSON.stringify(out.value)}, diagnostic ${out.diagnostic.code})`,
+    );
+  }
+
+  // 4. Labeled card relocated into a new wrapper with both values updated.
+  {
+    const { doc } = metricDoc(
+      `<div class="grid"><div class="card"><h3>Visits</h3><div class="stat">1,234 +5.2%</div></div></div>`,
+    );
+    const el = doc.querySelector('.stat')!;
+    const target = resolvePickerTarget(el)!;
+    assert(target.canonicalValue === '1,234', `picker resolves "1,234" (got ${JSON.stringify(target.canonicalValue)})`);
+    const fp = buildFingerprint(target.element, undefined, target.textAnchor);
+    doc.querySelector('.grid')!.innerHTML =
+      `<section><div class="card"><h3>Visits</h3><div class="stat">1,300 +6.0%</div></div></section>`;
+    const out = locateAndExtract(doc, fp, 'text', null);
+    assert(
+      out.value === '1,300',
+      `relocated card extracts its own updated metric "1,300", never the delta (got ${JSON.stringify(out.value)}, diagnostic ${out.diagnostic.code})`,
+    );
+    assert(
+      out.diagnostic.code === 'OK_RECOVERED',
+      `relocation is reported as a recovery (got ${out.diagnostic.code})`,
+    );
+  }
+
+  // 5. Bare metric with no preceding label still resolves to the metric
+  // at pick time (honestly flagged ambiguous between the two values),
+  // never silently to the delta.
+  {
+    const { doc } = metricDoc(`<div id="bare">1,234 +5.2%</div>`);
+    const target = resolvePickerTarget(doc.getElementById('bare')!)!;
+    assert(
+      target.canonicalValue === '1,234',
+      `bare metric resolves to "1,234" as canonical, not the delta (got ${JSON.stringify(target.canonicalValue)})`,
+    );
+    assert(target.isAmbiguous === true, 'two values with no disambiguator stay honestly flagged ambiguous');
+  }
+
+  // 6. Recovery onto a delta-only element of the SAME kind fails safe:
+  // same type, flipped sign shape, no anchor frame present - a nearby
+  // change indicator, not the watched value.
+  {
+    const { doc } = metricDoc(`<div class="card"><h3>Rate</h3><span class="v">87%</span></div>`);
+    const el = doc.querySelector('.v')!;
+    const target = resolvePickerTarget(el)!;
+    const fp = buildFingerprint(target.element, undefined, target.textAnchor);
+    doc.body.innerHTML = `<main><div class="card"><h3>Rate</h3><span class="v">+5.2%</span></div></main>`;
+    const out = locateAndExtract(doc, fp, 'text', null);
+    assert(
+      out.value === null,
+      `delta-only recovery returns no value instead of tracking "+5.2%" as the metric (got ${JSON.stringify(out.value)})`,
+    );
+    assert(
+      out.diagnostic.code === 'SELECTOR_RECOVERY_LOW_CONFIDENCE',
+      `delta-only recovery reports low confidence (got ${out.diagnostic.code})`,
+    );
+    assert(out.updatedFingerprint === null, 'delta-only recovery never heals onto the wrong element');
+  }
+
+  // 7. A genuine sign flip in the SAME slot (full anchor frame intact)
+  // still reads as an update, not a switch.
+  {
+    const { doc } = metricDoc(`<div class="card"><span>Battery 87% (YoY)</span></div>`);
+    const el = doc.querySelector('.card span')!;
+    const target = resolvePickerTarget(el)!;
+    assert(target.canonicalValue === '87%', `picker resolves "87%" (got ${JSON.stringify(target.canonicalValue)})`);
+    const fp = buildFingerprint(target.element, undefined, target.textAnchor);
+    doc.body.innerHTML = `<main><div class="card"><span>Battery -2% (YoY)</span></div></main>`;
+    const out = locateAndExtract(doc, fp, 'text', null);
+    assert(
+      out.value === '-2%',
+      `same-slot sign flip with intact frame reads the genuine update "-2%" (got ${JSON.stringify(out.value)}, diagnostic ${out.diagnostic.code})`,
+    );
+  }
+
+  // 8. Signed count delta in reversed order (delta first) still resolves
+  // the metric on update via the anchor frame + kind match.
+  {
+    const { doc } = metricDoc(
+      `<div id="u"><span>Visitors</span><span class="m">342</span><span>+12</span></div>`,
+    );
+    const spans = doc.querySelectorAll('#u span');
+    const target = resolvePickerTarget(spans[1]!)!;
+    assert(target.canonicalValue === '342', `picker resolves "342" (got ${JSON.stringify(target.canonicalValue)})`);
+    const fp = buildFingerprint(target.element, undefined, target.textAnchor);
+    doc.getElementById('u')!.innerHTML = '<span>+27</span><span>Visitors</span><span class="m">366</span>';
+    const out = locateAndExtract(doc, fp, 'text', null);
+    assert(
+      out.value === '366',
+      `reordered metric/delta update extracts "366", never the signed delta (got ${JSON.stringify(out.value)}, diagnostic ${out.diagnostic.code})`,
+    );
+  }
+}
+
 console.log('\nDone.');
 
 

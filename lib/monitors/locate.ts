@@ -2,7 +2,7 @@ import { locateElement, buildFingerprint, normalizeText, isEffectivelyEmpty, isV
 import { detectAntiAutomation, detectAuthWall } from './antiAutomation';
 import { diagnostic, type Diagnostic } from './diagnostics';
 import { withExponentialBackoff, sleep, type ReadinessResult } from './readiness';
-import { detectSemanticValue, extractNumericToken, type SemanticValue, type SemanticValueType } from './semanticValue';
+import { detectSemanticValue, extractNumericToken, CURRENCY_SYMBOLS, CURRENCY_CODES, type SemanticValue, type SemanticValueType } from './semanticValue';
 
 export interface LocateAndExtractResult {
   value: string | null;
@@ -117,8 +117,36 @@ export function locateAndExtract(
   let value: string | null = null;
 
   if (extracted !== null) {
+    // The anchored slice above already failed (a changed delta
+    // invalidated the frame) and the element's whole text holds more
+    // than one numeric token: the generic detector below would just
+    // take whichever token comes first, which is very often the
+    // change indicator ("Unique visitors 1002 +6.1%" -> "+6.1%")
+    // rather than the metric the monitor was picked for. Prefer the
+    // single token that matches the anchored value's own kind and
+    // sign shape instead - but only when exactly one such token
+    // exists, so a genuinely multi-metric element never gets
+    // resolved by guessing between its own values. `null` whenever
+    // the anchor is missing, non-numeric, or the text doesn't narrow
+    // to one anchor-like token, leaving every existing path below
+    // exactly as it was.
+    const anchorPreferred =
+      isNumericMonitor && extractMode === 'text'
+        ? preferAnchorKindToken(extracted, fp.textAnchor?.value ?? null)
+        : null;
+    const preferredSemantic =
+      anchorPreferred !== null ? detectSemanticValue(anchorPreferred) : null;
+    const hasPreferred =
+      anchorPreferred !== null &&
+      preferredSemantic !== null &&
+      preferredSemantic.type !== 'text' &&
+      preferredSemantic.normalized !== null;
     if (!isNumericMonitor) {
       value = extracted;
+    } else if (hasPreferred) {
+      isNumeric = true;
+      resolvedSemantic = preferredSemantic;
+      value = anchorPreferred;
     } else if (initialSemantic !== null && initialSemantic.type !== 'text' && initialSemantic.normalized !== null) {
       isNumeric = true;
       resolvedSemantic = initialSemantic;
@@ -224,6 +252,26 @@ export function locateAndExtract(
     anchorKind !== null &&
     resolvedKind !== null &&
     anchorKind !== resolvedKind;
+  // Same kind but a different sign shape: the relocated slot now shows
+  // an explicitly signed value where the picked one was unsigned, or
+  // vice versa ("87%" -> "+5.2%"). On dashboards that shape is the
+  // change indicator next to the metric, not the metric itself - a
+  // relocated element showing it is far more likely a neighboring
+  // delta than the watched value with a genuinely flipped sign. The
+  // one exception is a candidate that still carries the anchor's full
+  // frame (every non-empty before/after part present): same slot,
+  // same context, so a flipped sign there reads as a genuine update,
+  // not a switch to a nearby value. Exact matches are exempt entirely
+  // (a page legitimately restyles its own value in place).
+  const anchorSigned = hasExplicitSign(fp.textAnchor?.value ?? '');
+  const resolvedSigned = value !== null ? hasExplicitSign(value) : false;
+  const signMismatch =
+    !wasExactMatch &&
+    value !== null &&
+    anchorKind !== null &&
+    anchorKind === resolvedKind &&
+    anchorSigned !== resolvedSigned &&
+    !hasFullFrameEvidence(fp.textAnchor, normalizeText(element.textContent ?? ''));
   // A reading that merely echoes the anchor's own frame (its before or
   // after context) without containing the anchored value is surrounding
   // context masquerading as the value - e.g. a slot now holding the old
@@ -232,10 +280,12 @@ export function locateAndExtract(
   // slot no longer holds the metric, and storing context as a reading
   // is never right.
   const frameEcho = value !== null && isFrameEcho(fp.textAnchor, value);
-  if (kindMismatch || frameEcho) {
+  if (kindMismatch || signMismatch || frameEcho) {
     const detail = kindMismatch
       ? `relocated value is ${resolvedKind}, expected ${anchorKind} like "${fp.textAnchor?.value ?? ''}"`
-      : `extracted text repeats the anchor frame instead of its value ("${value}")`;
+      : signMismatch
+        ? `relocated value "${value}" has a different sign shape than expected like "${fp.textAnchor?.value ?? ''}" (a nearby change indicator, not the watched value)`
+        : `extracted text repeats the anchor frame instead of its value ("${value}")`;
     return {
       value: null,
       diagnostic: diagnostic('SELECTOR_RECOVERY_LOW_CONFIDENCE', detail),
@@ -298,6 +348,139 @@ function extractValue(
 }
 
 /**
+ * True when `text` carries an explicit leading `+`/`-` sign. On
+ * analytics dashboards that shape is almost always a change
+ * indicator annotating a nearby metric ("+5.2%", "-4.5%"), not the
+ * metric itself - the same distinction the picker's signed-delta
+ * demotion (see `pickerTarget.ts`) draws at capture time.
+ */
+function hasExplicitSign(text: string): boolean {
+  return /^[+-]/.test(text.trim());
+}
+
+/**
+ * Whether the numeric token starting at `start` in `full` is signed,
+ * looking one non-space character past the token's own start. Needed
+ * because the plain-number pattern below (like the picker's) captures
+ * only the digits ("+12" tokenizes as "12"): the sign lives in the
+ * surrounding text, not the token. A `-` preceded by a digit or a
+ * closing paren is subtraction/a range ("100-5"), not a sign, so it
+ * doesn't count; a `+` is never an operator in this position and
+ * always counts.
+ */
+function hasSignByLookback(full: string, start: number): boolean {
+  let i = start - 1;
+  while (i >= 0 && /\s/.test(full[i])) i -= 1;
+  if (i < 0) return false;
+  const c = full[i];
+  if (c === '+') return true;
+  if (c !== '-') return false;
+  const prev = i > 0 ? full[i - 1] : '';
+  return !(prev !== '' && /[0-9)]/.test(prev));
+}
+
+interface AnchorKindToken {
+  token: string;
+  start: number;
+  end: number;
+  type: SemanticValueType;
+  signed: boolean;
+}
+
+/**
+ * Every numeric token in `text` (currency, percentage, scaled count,
+ * stars, storage, duration, plain number), in document order, each
+ * classified on its own and marked for an explicit sign. Mirrors the
+ * picker's `findNumericCandidates` pattern families so capture and
+ * check agree on what counts as a token; overlapping spans resolve
+ * to the most specific family first via the covered-span scheme.
+ */
+function collectNumericTokens(text: string): AnchorKindToken[] {
+  const out: AnchorKindToken[] = [];
+  const covered = new Array<boolean>(text.length).fill(false);
+
+  function isOverlapping(start: number, end: number): boolean {
+    for (let i = start; i < end; i++) {
+      if (covered[i]) return true;
+    }
+    return false;
+  }
+
+  function markCovered(start: number, end: number): void {
+    for (let i = start; i < end; i++) {
+      covered[i] = true;
+    }
+  }
+
+  function add(token: string, start: number, end: number): void {
+    if (isOverlapping(start, end)) return;
+    const trimmed = token.trim();
+    if (!trimmed || !/\d/.test(trimmed)) return;
+    const semantic = detectSemanticValue(trimmed);
+    if (semantic.type === 'text' || semantic.normalized === null) return;
+    markCovered(start, end);
+    out.push({
+      token: trimmed,
+      start,
+      end,
+      type: semantic.type,
+      signed: hasExplicitSign(trimmed) || hasSignByLookback(text, start),
+    });
+  }
+
+  function addRegex(regex: RegExp): void {
+    regex.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(text)) !== null) {
+      const full = match[1] ?? match[0];
+      const start = match.index + match[0].indexOf(full);
+      add(full, start, start + full.length);
+      if (match[0].length === 0) regex.lastIndex += 1;
+    }
+  }
+
+  for (const [symbol] of CURRENCY_SYMBOLS) {
+    if (!text.includes(symbol)) continue;
+    const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    addRegex(new RegExp(`(?:^|[^\\w$])([-+]?\\s*${escaped}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?)\\b`, 'gi'));
+    addRegex(new RegExp(`(?:^|[^\\w$])([-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?\\s*${escaped})(?=[^\\w$]|$)`, 'gi'));
+  }
+  for (const code of CURRENCY_CODES) {
+    if (!text.includes(code)) continue;
+    addRegex(new RegExp(`\\b(${code}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?)\\b`, 'gi'));
+    addRegex(new RegExp(`\\b([-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?\\s*${code})\\b`, 'gi'));
+  }
+  addRegex(/([+-]?\s*[\d,]+(?:\.\d+)?\s*%)/g);
+  addRegex(/\b(-?[\d,]+(?:\.\d+)?\s*(?:k|mm|m|bn|b|t))\b/gi);
+  addRegex(/\b(\d+(?:\.\d+)?\s*(?:\/\s*\d+|out of\s*\d+|★|stars?))\b/gi);
+  addRegex(/(-?[\d,]+(?:\.\d+)?\s*(?:pib|tib|gib|mib|kib|pb|tb|gb|mb|kb|bytes?|b))\b/gi);
+  addRegex(/\b(\d+:\d{2}(?::\d{2})?)\b/g);
+  addRegex(/(\d+(?:\.\d+)?\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?:\s*\d+(?:\.\d+)?\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s))*)\b/gi);
+  addRegex(/\b(-?[\d,]+(?:\.\d+)?)\b/g);
+
+  return out.sort((a, b) => a.start - b.start);
+}
+
+/**
+ * The single token in `text` matching the anchored value's own
+ * semantic kind and sign shape, or `null` unless exactly one such
+ * token exists. `null` anchor (monitors captured before text anchors
+ * existed) or a non-numeric anchor (text monitors) always yields
+ * `null`, so those paths behave exactly as before.
+ */
+function preferAnchorKindToken(text: string, anchorValue: string | null): string | null {
+  if (!anchorValue) return null;
+  const anchorSemantic = detectSemanticValue(anchorValue);
+  if (anchorSemantic.type === 'text' || anchorSemantic.normalized === null) return null;
+  const anchorSigned = hasExplicitSign(anchorValue);
+  const matches = collectNumericTokens(text).filter(
+    (t) => t.type === anchorSemantic.type && t.signed === anchorSigned,
+  );
+  if (matches.length !== 1) return null;
+  return matches[0]!.token;
+}
+
+/**
  * End offset of the latest `before` occurrence that still has `after`
  * following it (-1 when no such frame exists). Repeated labels
  * ("Total … Total $100") must slice from the nearest frame, not the
@@ -339,6 +522,23 @@ function isOrderedCandidate(
     if (valueIndex !== -1 && valueIndex + anchor.value.length > end) return false;
   }
   return true;
+}
+
+/**
+ * True when every non-empty part of the anchor's frame is still
+ * present in `fullText` (and at least one such part exists). A
+ * frameless anchor carries no evidence either way, so this is false
+ * for it: with nothing to confirm the slot, a sign flip on a
+ * relocated element reads as a switch, not an update.
+ */
+function hasFullFrameEvidence(
+  anchor: TextAnchor | null | undefined,
+  fullText: string,
+): boolean {
+  if (!anchor) return false;
+  const parts = [anchor.before, anchor.after].filter((p) => p && p.length > 0);
+  if (parts.length === 0) return false;
+  return parts.every((p) => fullText.includes(p!));
 }
 
 /**

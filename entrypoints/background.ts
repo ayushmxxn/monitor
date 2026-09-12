@@ -1,20 +1,23 @@
-import { onMessage, sendMessage } from '@/lib/messaging';
-import type { AppInfo } from '@/lib/messaging';
-import { getSettings } from '@/lib/storage';
-import { isInjectablePage } from '@/lib/browserPages';
-import { hasOriginPermission, requestOriginPermission } from '@/lib/permissions';
+import { isInjectablePage } from "@/lib/browserPages";
+import type { AppInfo } from "@/lib/messaging";
+import { onMessage, sendMessage } from "@/lib/messaging";
+import { checkMonitorById } from "@/lib/monitors/checker";
+import { runPickerFlow } from "@/lib/monitors/pickerFlow";
 import {
+  checkAllMonitorsNow,
   ensureScheduler,
   isSchedulerAlarm,
   runDueMonitors,
-  checkAllMonitorsNow,
-} from '@/lib/monitors/scheduler';
-import { checkMonitor, checkMonitorById } from '@/lib/monitors/checker';
-import { deliverTestAlert } from '@/lib/monitors/testDelivery';
-import { getMonitor } from '@/lib/monitors/store';
-import { runPickerFlow } from '@/lib/monitors/pickerFlow';
+} from "@/lib/monitors/scheduler";
+import { getMonitor } from "@/lib/monitors/store";
+import { deliverTestAlert } from "@/lib/monitors/testDelivery";
+import {
+  hasOriginPermission,
+  requestOriginPermission,
+} from "@/lib/permissions";
+import { getSettings } from "@/lib/storage";
 
-const PANEL_SCRIPT_FILE = '/content-scripts/panel.js';
+const PANEL_SCRIPT_FILE = "/content-scripts/panel.js";
 
 export default defineBackground(() => {
   registerMessageHandlers();
@@ -26,7 +29,7 @@ export default defineBackground(() => {
   // it should only exist while a live check actually needs it (see
   // liveTabStrategy.ts), not from the moment the browser or extension
   // starts - so reloading the extension never opens a window on its own.
-  if (import.meta.env.COMMAND === 'serve') {
+  if (import.meta.env.COMMAND === "serve") {
     void reinitDevTabs();
   }
 });
@@ -39,35 +42,41 @@ export default defineBackground(() => {
  * import + register them here.
  */
 function registerMessageHandlers(): void {
-  onMessage('ping', () => 'pong');
+  onMessage("ping", () => "pong");
 
-  onMessage('getAppInfo', async (): Promise<AppInfo> => {
+  onMessage("getAppInfo", async (): Promise<AppInfo> => {
     const manifest = browser.runtime.getManifest();
     return {
       version: manifest.version,
-      name: manifest.name ?? 'Monitor',
+      name: manifest.name ?? "Monitor",
       installType: await getInstallType(),
     };
   });
 
-  onMessage('checkMonitorNow', async ({ data: monitorId }) => {
+  onMessage("checkMonitorNow", async ({ data: monitorId }) => {
     try {
       await checkMonitorById(monitorId);
       return { ok: true, error: null };
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : 'The check failed.' };
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : "The check failed.",
+      };
     }
   });
 
-  onMessage('checkAllMonitorsNow', async () => {
+  onMessage("checkAllMonitorsNow", async () => {
     await checkAllMonitorsNow();
     return { ok: true, error: null };
   });
 
-  onMessage('startElementPicker', async () => {
-    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  onMessage("startElementPicker", async () => {
+    const [tab] = await browser.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
     if (!tab?.id || !isInjectablePage(tab.url)) {
-      return { started: false, error: 'Monitor only supports http(s) pages.' };
+      return { started: false, error: "Monitor only supports http(s) pages." };
     }
     // Deliberately not awaited: this handler must return before the user
     // has clicked anything, so the panel that sent this message is free
@@ -77,12 +86,12 @@ function registerMessageHandlers(): void {
     return { started: true, error: null };
   });
 
-  onMessage('openOptionsPage', async () => {
+  onMessage("openOptionsPage", async () => {
     await browser.runtime.openOptionsPage();
     return { ok: true };
   });
 
-  onMessage('checkOriginPermissions', async ({ data: urls }) => {
+  onMessage("checkOriginPermissions", async ({ data: urls }) => {
     const entries = await Promise.all(
       urls.map(async (url) => {
         const result = await hasOriginPermission(url);
@@ -92,7 +101,7 @@ function registerMessageHandlers(): void {
     return Object.fromEntries(entries);
   });
 
-  onMessage('testWebhookDelivery', async ({ data }) => deliverTestAlert(data));
+  onMessage("testWebhookDelivery", async ({ data }) => deliverTestAlert(data));
 }
 
 /**
@@ -111,10 +120,10 @@ function registerScheduler(): void {
 
 function registerNotificationClick(): void {
   browser.notifications?.onClicked?.addListener(async (notificationId) => {
-    const prefix = 'monitor-changed-';
+    const prefix = "monitor-changed-";
     if (!notificationId.startsWith(prefix)) return;
     const rest = notificationId.slice(prefix.length);
-    const lastDash = rest.lastIndexOf('-');
+    const lastDash = rest.lastIndexOf("-");
     const monitorId = lastDash !== -1 ? rest.slice(0, lastDash) : rest;
     if (!monitorId) return;
 
@@ -127,7 +136,9 @@ function registerNotificationClick(): void {
         const tabs = await browser.tabs.query({ url: targetUrl });
         if (tabs.length > 0 && tabs[0]?.id) {
           if (tabs[0].windowId) {
-            await browser.windows.update(tabs[0].windowId, { focused: true }).catch(() => {});
+            await browser.windows
+              .update(tabs[0].windowId, { focused: true })
+              .catch(() => {});
           }
           await browser.tabs.update(tabs[0].id, { active: true });
           return;
@@ -137,7 +148,7 @@ function registerNotificationClick(): void {
       }
       await browser.tabs.create({ url: targetUrl });
     } catch (error) {
-      console.error('[background] Failed to handle notification click:', error);
+      console.error("[background] Failed to handle notification click:", error);
     }
   });
 }
@@ -178,7 +189,11 @@ function registerActionClick(): void {
       // A declined native permission prompt is an intentional choice,
       // not an error state that needs an in-page explanation.
       if (!result.ok || !result.value) {
-        if (!result.ok) console.error('[background] Failed to request site access:', result.error);
+        if (!result.ok)
+          console.error(
+            "[background] Failed to request site access:",
+            result.error,
+          );
         return;
       }
       void toggleOrInjectPanel(tabId);
@@ -202,7 +217,7 @@ function registerActionClick(): void {
  */
 async function toggleOrInjectPanel(tabId: number): Promise<void> {
   try {
-    const response = await sendMessage('togglePanel', undefined, tabId);
+    const response = await sendMessage("togglePanel", undefined, tabId);
     if (response?.handled) return;
   } catch {
     // No listener on this tab yet - fall through to inject below.
@@ -210,7 +225,9 @@ async function toggleOrInjectPanel(tabId: number): Promise<void> {
 
   browser.scripting
     .executeScript({ target: { tabId }, files: [PANEL_SCRIPT_FILE] })
-    .catch((error: unknown) => console.error('[background] Failed to open panel:', error));
+    .catch((error: unknown) =>
+      console.error("[background] Failed to open panel:", error),
+    );
 }
 
 /**
@@ -222,22 +239,25 @@ async function toggleOrInjectPanel(tabId: number): Promise<void> {
 function notifyUnsupportedPage(): void {
   browser.notifications
     .create({
-      type: 'basic',
-      iconUrl: browser.runtime.getURL('/icon/128.png'),
-      title: 'Monitor',
-      message: "Monitor can't run on this page. Try it on a regular website instead.",
+      type: "basic",
+      iconUrl: browser.runtime.getURL("/icon/128.png"),
+      title: "Monitor",
+      message:
+        "Monitor can't run on this page. Try it on a regular website instead.",
     })
-    .catch((error: unknown) => console.error('[background] Failed to show notification:', error));
+    .catch((error: unknown) =>
+      console.error("[background] Failed to show notification:", error),
+    );
 }
 
-async function getInstallType(): Promise<AppInfo['installType']> {
+async function getInstallType(): Promise<AppInfo["installType"]> {
   try {
     const info = await browser.management.getSelf();
     return info.installType;
   } catch {
     // `management` permission isn't requested by default; fall back
     // gracefully rather than requiring it just for diagnostics.
-    return 'unknown';
+    return "unknown";
   }
 }
 
@@ -245,7 +265,10 @@ async function getInstallType(): Promise<AppInfo['installType']> {
 async function initializeSettingsOnInstall(): Promise<void> {
   const result = await getSettings();
   if (!result.ok) {
-    console.error('[background] Failed to read settings on init:', result.error);
+    console.error(
+      "[background] Failed to read settings on init:",
+      result.error,
+    );
   }
 }
 
@@ -260,7 +283,8 @@ async function reinitDevTabs(): Promise<void> {
 
         const results = await browser.scripting.executeScript({
           target: { tabId: tab.id },
-          func: () => document.documentElement.dataset.monitorPanelOpen === 'true',
+          func: () =>
+            document.documentElement.dataset.monitorPanelOpen === "true",
         });
         if (results[0]?.result) {
           await browser.scripting.executeScript({
@@ -276,4 +300,3 @@ async function reinitDevTabs(): Promise<void> {
     // Ignore dev reinit errors.
   }
 }
-

@@ -1,13 +1,17 @@
 import { Favicon } from "@/components/layout/Favicon";
-import { formatRelativeTime } from "@/lib/format";
+import { formatAdaptiveValue, formatRelativeTime } from "@/lib/format";
 import { checkMonitorNow } from "@/lib/monitors/client";
+import { SpinningCounter } from "@/components/ui/SpinningCounter";
+import { ValueScanner } from "@/components/ui/ValueScanner";
 import { useIsChecking } from "@/hooks/useIsChecking";
+import { useCheckStage } from "@/hooks/useCheckStage";
 import { getFailureStateInfo } from "@/lib/monitors/diagnostics";
 import type { Monitor } from "@/lib/monitors/types";
 import { cn } from "@/lib/utils";
 import {
   AlertCircle,
   FileQuestion,
+  Loader2,
   RefreshCw,
   ShieldAlert,
   Trash2,
@@ -22,7 +26,7 @@ interface MonitorCardProps {
   onOpen: (id: string) => void;
 }
 
-const REMOVE_TRANSITION_MS = 160;
+const REMOVE_TRANSITION_MS = 180;
 
 /**
  * A single bento tile on the panel's home screen: the value front
@@ -44,11 +48,11 @@ export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen
     : null;
   const isCheckingInFlight = useIsChecking(monitor.id);
   const isChecking = isCheckingInFlight || monitor.lastStatus === "checking";
+  const isCheckingActive = isChecking || isRetrying;
   const hasValue = monitor.lastValue !== null;
-  // Temporary check failures preserve the last good value and status, so
-  // without this the timestamp below reads as a fresh successful read.
-  // Derived purely from persisted state: clears itself on recovery.
-  const isStaleRetrying = !isError && monitor.consecutiveFailures > 0;
+  const isNewMonitorLoading = !hasValue && !isError;
+  const checkStageText = useCheckStage(isCheckingActive || isNewMonitorLoading);
+
 
   const handleConfirmDelete = useCallback(() => {
     // Fade/scale out first, then remove from the underlying list once
@@ -97,15 +101,16 @@ export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen
   return (
     <div
       className={cn(
-        "group relative overflow-hidden rounded-lg bg-muted/50 transition-all duration-150 ease-out hover:bg-accent active:scale-[0.985]",
-        isRemoving && "pointer-events-none scale-95 opacity-0",
+        "group relative overflow-hidden rounded-lg bg-muted/50 transition-all duration-150 ease-out hover:bg-accent active:scale-[0.985] origin-center",
+        isRemoving &&
+          "pointer-events-none scale-[0.92] opacity-0 blur-[1.5px] duration-200 ease-out motion-reduce:scale-100 motion-reduce:blur-0 motion-reduce:transition-none",
       )}
     >
       <button
         onClick={handleCardClick}
         className="flex w-full flex-col items-start gap-2 p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
-        <div className="w-full min-w-0 pr-4">
+        <div className={cn("w-full min-w-0", !isNewMonitorLoading && "pr-4")}>
           {hasValue ? (
             <div className="flex items-center gap-1.5 min-w-0">
               <p
@@ -113,11 +118,21 @@ export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen
                 className={cn(
                   "truncate text-[20px] font-semibold leading-[1.15] tracking-[-0.01em] tabular-nums",
                   isError ? "text-muted-foreground" : "text-foreground",
-                  (isChecking || isRetrying) && "animate-pulse",
+                  isCheckingActive && "opacity-80",
                 )}
               >
-                {monitor.lastValue}
+                <SpinningCounter
+                  key={monitor.id}
+                  value={formatAdaptiveValue(
+                    monitor.lastValue,
+                    monitor.lastSemanticValue,
+                  )}
+                  lastCheckedAt={monitor.lastCheckedAt}
+                />
               </p>
+              {isCheckingActive && !isError && (
+                <ValueScanner className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
+              )}
               {isError && (
                 <span
                   title={failureInfo?.description ?? "Check failed"}
@@ -137,9 +152,16 @@ export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen
                 {failureInfo?.label}
               </span>
             </div>
+          ) : isNewMonitorLoading ? (
+            <div
+              className="flex h-[23px] w-full items-center justify-center"
+              aria-label="Loading initial value"
+            >
+              <ValueScanner className="h-4 w-4 shrink-0 text-muted-foreground/70" />
+            </div>
           ) : (
             <p className="truncate text-[20px] font-semibold leading-[1.15] tracking-[-0.01em] tabular-nums text-muted-foreground/50">
-              {isChecking || isRetrying ? "···" : "—"}
+              —
             </p>
           )}
         </div>
@@ -168,15 +190,18 @@ export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen
               isError ? "text-destructive" : "text-muted-foreground/60",
             )}
           >
-            {isChecking || isRetrying
-              ? "Checking…"
-              : isError
-                ? `${failureInfo?.label ?? "Check failed"}${hasValue ? " (stale)" : ""}`
-                : monitor.lastCheckedAt
-                  ? isStaleRetrying
-                    ? `Updated ${formatRelativeTime(monitor.lastCheckedAt)} · retrying`
-                    : `Updated ${formatRelativeTime(monitor.lastCheckedAt)}`
-                  : "Not checked yet"}
+            {isCheckingActive || isNewMonitorLoading ? (
+              <span className="inline-flex items-center gap-1">
+                <Loader2 className="h-2.5 w-2.5 animate-spin shrink-0 text-muted-foreground/70" />
+                {checkStageText ?? "Checking…"}
+              </span>
+            ) : isError ? (
+              `${failureInfo?.label ?? "Check failed"}${hasValue ? " (stale)" : ""}`
+            ) : monitor.lastCheckedAt ? (
+              `Updated ${formatRelativeTime(monitor.lastCheckedAt)}`
+            ) : (
+              "Not checked yet"
+            )}
           </span>
           {retryError && (
             <span role="alert" className="truncate text-[10px] text-destructive">

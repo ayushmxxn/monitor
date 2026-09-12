@@ -1,24 +1,69 @@
-import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
-import { formatDateTime } from '@/lib/format';
-import { cn } from '@/lib/utils';
-import type { SemanticValueType } from '@/lib/monitors/semanticValue';
-import type { MonitorCheck } from '@/lib/monitors/types';
-import { calculateValueChange } from '@/lib/monitors/changeSummary';
+import type { SemanticValueType } from "@/lib/monitors/semanticValue";
+import type { MonitorCheck } from "@/lib/monitors/types";
+import { playSound } from "@/lib/ui/sound";
+import { cn } from "@/lib/utils";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+} from "react";
 
 interface HistoryChartProps {
   history: MonitorCheck[];
+  /**
+   * Called with the exact hovered reading while the user scrubs, and
+   * with `null` when the pointer leaves (or the hovered reading goes
+   * away), so the parent can show that reading live and fall back to
+   * the latest otherwise. Always a real recorded point - never an
+   * interpolated value.
+   */
+  onScrub?: (reading: ScrubbedReading | null) => void;
+  range?: RangeKey;
+  onRangeChange?: (range: RangeKey) => void;
 }
 
-type RangeKey = '24h' | '7d' | '30d';
+/** One real recorded reading surfaced while scrubbing. */
+export interface ScrubbedReading {
+  raw: string;
+  checkedAt: number;
+}
 
-const RANGE_OPTIONS: { key: RangeKey; label: string; ms: number }[] = [
-  { key: '24h', label: '24H', ms: 24 * 60 * 60 * 1000 },
-  { key: '7d', label: '7D', ms: 7 * 24 * 60 * 60 * 1000 },
-  { key: '30d', label: '30D', ms: 30 * 24 * 60 * 60 * 1000 },
+export type RangeKey = "24h" | "7d" | "30d";
+
+export interface RangeOption {
+  key: RangeKey;
+  label: string;
+  ms: number;
+  description: string;
+}
+
+export const RANGE_OPTIONS: RangeOption[] = [
+  {
+    key: "24h",
+    label: "24H",
+    ms: 24 * 60 * 60 * 1000,
+    description: "past 24 hours",
+  },
+  {
+    key: "7d",
+    label: "7D",
+    ms: 7 * 24 * 60 * 60 * 1000,
+    description: "past 7 days",
+  },
+  {
+    key: "30d",
+    label: "30D",
+    ms: 30 * 24 * 60 * 60 * 1000,
+    description: "past 30 days",
+  },
 ];
 
 /** Below this many usable points a line reads as noise, not a trend - show the empty state instead. */
-const MIN_POINTS_TO_CHART = 3;
+export const MIN_POINTS_TO_CHART = 3;
 
 // SVG coordinate space. `chartWidth` (state, tracked live via
 // ResizeObserver below) always matches the container's real pixel
@@ -33,74 +78,278 @@ const MIN_POINTS_TO_CHART = 3;
 // a narrow panel. Keeping the viewBox 1:1 with real pixels means
 // nothing inside the SVG is ever non-uniformly scaled, at any panel
 // width. `CHART_H` stays fixed real pixels either way (set again as
-// the `height` attribute), so vertical hover math and tooltip
-// placement are unaffected by this.
+// the `height` attribute), so vertical hover math is unaffected by
+// this.
 const DEFAULT_CHART_W = 300;
 const MIN_CHART_W = 120;
-const CHART_H = 168;
+const CHART_H = 180;
 const PAD_TOP = 18;
 const PAD_BOTTOM = 24;
 const PAD_X = 10;
 const PLOT_H = CHART_H - PAD_TOP - PAD_BOTTOM;
-/** Minimum gap kept between the tooltip and the chart's own edges, so it's never flush against - let alone past - the panel's border. */
-const TOOLTIP_EDGE_GAP = 6;
-/** Minimum gap kept between the tooltip and the hovered point itself. */
-const TOOLTIP_POINT_GAP = 10;
-
-function clampNum(value: number, min: number, max: number): number {
-  if (max < min) return min;
-  return Math.min(Math.max(value, min), max);
-}
 
 interface ChartPoint {
   x: number;
   y: number;
   checkedAt: number;
   raw: string;
-  changeSummary?: string | null;
+}
+
+export interface SplineSegment {
+  p0: { x: number; y: number };
+  p1: { x: number; y: number };
+  c1: { x: number; y: number };
+  c2: { x: number; y: number };
+}
+
+export interface SplineData {
+  linePath: string;
+  segments: SplineSegment[];
 }
 
 /**
- * Builds an SVG path string that connects recorded observations using straight
- * line segments (`L`). No bezier curves, splines, or smoothing are used,
- * ensuring every segment directly represents recorded values.
+ * Computes a smooth Fritsch-Carlson monotone cubic spline (`C`) and its
+ * segment control points. Passes exactly through every input point preserving
+ * exact recorded values while preventing overshoot or loops.
+ */
+export function computeSpline(points: { x: number; y: number }[]): SplineData {
+  const n = points.length;
+  if (n === 0) return { linePath: "", segments: [] };
+  if (n === 1) {
+    return {
+      linePath: `M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`,
+      segments: [],
+    };
+  }
+  if (n === 2) {
+    return {
+      linePath: `M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)} L ${points[1].x.toFixed(2)} ${points[1].y.toFixed(2)}`,
+      segments: [
+        {
+          p0: points[0],
+          p1: points[1],
+          c1: points[0],
+          c2: points[1],
+        },
+      ],
+    };
+  }
+
+  const dx: number[] = [];
+  const dy: number[] = [];
+  const slopes: number[] = [];
+
+  for (let i = 0; i < n - 1; i++) {
+    const deltax = points[i + 1].x - points[i].x;
+    const deltay = points[i + 1].y - points[i].y;
+    dx.push(deltax);
+    dy.push(deltay);
+    slopes.push(deltax === 0 ? 0 : deltay / deltax);
+  }
+
+  const m: number[] = new Array(n).fill(0);
+
+  m[0] = slopes[0];
+  m[n - 1] = slopes[n - 2];
+
+  for (let i = 1; i < n - 1; i++) {
+    if (slopes[i - 1] * slopes[i] <= 0) {
+      m[i] = 0;
+    } else {
+      const hPrev = dx[i - 1];
+      const hNext = dx[i];
+      if (hPrev + hNext === 0) {
+        m[i] = 0;
+      } else {
+        m[i] = (hPrev * slopes[i] + hNext * slopes[i - 1]) / (hPrev + hNext);
+      }
+    }
+  }
+
+  for (let i = 0; i < n - 1; i++) {
+    if (slopes[i] === 0) {
+      m[i] = 0;
+      m[i + 1] = 0;
+    } else {
+      const alpha = m[i] / slopes[i];
+      const beta = m[i + 1] / slopes[i];
+      if (alpha < 0) m[i] = 0;
+      if (beta < 0) m[i + 1] = 0;
+      const hyp = alpha * alpha + beta * beta;
+      if (hyp > 9) {
+        const tau = 3 / Math.sqrt(hyp);
+        m[i] = tau * alpha * slopes[i];
+        m[i + 1] = tau * beta * slopes[i];
+      }
+    }
+  }
+
+  const segments: SplineSegment[] = [];
+  let d = `M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`;
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = points[i];
+    const p1 = points[i + 1];
+    const deltax = dx[i];
+
+    if (deltax === 0) {
+      d += ` L ${p1.x.toFixed(2)} ${p1.y.toFixed(2)}`;
+      segments.push({ p0, p1, c1: p0, c2: p1 });
+      continue;
+    }
+
+    const c1x = p0.x + deltax / 3;
+    const c1y = p0.y + (m[i] * deltax) / 3;
+    const c2x = p1.x - deltax / 3;
+    const c2y = p1.y - (m[i + 1] * deltax) / 3;
+
+    d += ` C ${c1x.toFixed(2)} ${c1y.toFixed(2)}, ${c2x.toFixed(2)} ${c2y.toFixed(2)}, ${p1.x.toFixed(2)} ${p1.y.toFixed(2)}`;
+    segments.push({
+      p0,
+      p1,
+      c1: { x: c1x, y: c1y },
+      c2: { x: c2x, y: c2y },
+    });
+  }
+
+  return { linePath: d, segments };
+}
+
+/**
+ * Builds an SVG path string that connects recorded observations using a smooth
+ * Fritsch-Carlson monotone cubic spline (`C`).
  */
 export function monotonePath(points: { x: number; y: number }[]): string {
-  const n = points.length;
-  if (n === 0) return '';
-  let d = `M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`;
-  for (let i = 1; i < n; i++) {
-    d += ` L ${points[i].x.toFixed(2)} ${points[i].y.toFixed(2)}`;
+  return computeSpline(points).linePath;
+}
+
+/**
+ * Continuously evaluates the exact vertical position on the monotone cubic
+ * spline curve for any horizontal position `targetX`.
+ */
+export function getYOnSpline(
+  points: { x: number; y: number }[],
+  segments: SplineSegment[],
+  targetX: number,
+): number {
+  if (points.length === 0) return 0;
+  if (points.length === 1) return points[0].y;
+
+  const minX = points[0].x;
+  const maxX = points[points.length - 1].x;
+  const clampedX = Math.max(minX, Math.min(maxX, targetX));
+
+  if (segments.length === 0) {
+    const dx = points[points.length - 1].x - points[0].x;
+    if (dx === 0) return points[0].y;
+    const t = (clampedX - points[0].x) / dx;
+    return points[0].y + t * (points[points.length - 1].y - points[0].y);
   }
-  return d;
+
+  let seg = segments[segments.length - 1];
+  for (let i = 0; i < segments.length; i++) {
+    if (clampedX <= segments[i].p1.x || i === segments.length - 1) {
+      seg = segments[i];
+      break;
+    }
+  }
+
+  const dx = seg.p1.x - seg.p0.x;
+  if (dx <= 0) return seg.p1.y;
+
+  const t = Math.max(0, Math.min(1, (clampedX - seg.p0.x) / dx));
+  const mt = 1 - t;
+  return (
+    mt * mt * mt * seg.p0.y +
+    3 * mt * mt * t * seg.c1.y +
+    3 * mt * t * t * seg.c2.y +
+    t * t * t * seg.p1.y
+  );
 }
 
 /** Compact axis label, format chosen by how wide the visible range is. */
 function formatTick(timestamp: number, range: RangeKey): string {
   const date = new Date(timestamp);
-  if (range === '24h') {
-    return new Intl.DateTimeFormat(undefined, { hour: 'numeric' }).format(date);
+  if (range === "24h") {
+    return new Intl.DateTimeFormat(undefined, { hour: "numeric" }).format(date);
   }
-  if (range === '7d') {
-    return new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(date);
+  if (range === "7d") {
+    return new Intl.DateTimeFormat(undefined, { weekday: "short" }).format(
+      date,
+    );
   }
-  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date);
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+  }).format(date);
 }
 
-type NumericCheck = MonitorCheck & { semanticValue: NonNullable<MonitorCheck['semanticValue']> };
+/** Overall direction of the visible range: first vs. last recorded value. Drives the line color. */
+export type ChartTrend = "up" | "down" | "flat";
+
+export type NumericCheck = MonitorCheck & {
+  semanticValue: NonNullable<MonitorCheck["semanticValue"]>;
+};
+
+/** Restricts history to chronological, valid numeric checks of consistent semantic type. */
+export function getChartablePoints(history: MonitorCheck[]): NumericCheck[] {
+  const chronological = [...history].reverse();
+  const numeric = chronological.filter(
+    (entry): entry is NumericCheck =>
+      entry.error === null &&
+      entry.semanticValue !== null &&
+      entry.semanticValue.normalized !== null &&
+      Number.isFinite(entry.semanticValue.normalized),
+  );
+  if (numeric.length === 0) return [];
+  const referenceType: SemanticValueType =
+    numeric[numeric.length - 1].semanticValue.type;
+  return numeric.filter((entry) => entry.semanticValue.type === referenceType);
+}
 
 /** Picks the narrowest range that still has at least two points to plot, defaulting to '30d' if sparse. */
-function pickDefaultRange(points: NumericCheck[]): RangeKey {
+export function pickDefaultRange(points: NumericCheck[]): RangeKey {
   const now = Date.now();
   for (const opt of RANGE_OPTIONS) {
     const count = points.filter((p) => now - p.checkedAt <= opt.ms).length;
     if (count >= 2) return opt.key;
   }
-  return '30d';
+  return "30d";
 }
 
-export const HistoryChart = memo(function HistoryChart({ history }: HistoryChartProps) {
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+/**
+ * Index of the real recorded point nearest to a horizontal chart
+ * position. Scrubbing always lands on an actual observation - values
+ * are never interpolated between two readings. Ties keep the earlier
+ * (leftmost) point so the result is deterministic.
+ */
+export function nearestPointIndex(
+  points: { x: number }[],
+  userX: number,
+): number {
+  let nearest = 0;
+  let nearestDist = Infinity;
+  points.forEach((p, i) => {
+    const dist = Math.abs(p.x - userX);
+    if (dist < nearestDist) {
+      nearestDist = dist;
+      nearest = i;
+    }
+  });
+  return nearest;
+}
+
+export const HistoryChart = memo(function HistoryChart({
+  history,
+  onScrub,
+  range: propRange,
+  onRangeChange,
+}: HistoryChartProps) {
+  const [hoverPos, setHoverPos] = useState<{
+    x: number;
+    y: number;
+    index: number;
+  } | null>(null);
+  const lastAudioIndexRef = useRef<number | null>(null);
 
   // Tracks the chart container's real pixel width live, including
   // while the panel is being drag-resized (see `Panel.tsx`) - not just
@@ -117,11 +366,13 @@ export const HistoryChart = memo(function HistoryChart({ history }: HistoryChart
     resizeObserverRef.current = null;
     if (!node) return;
     if (node.clientWidth > 0) setChartWidth(node.clientWidth);
-    if (typeof ResizeObserver === 'undefined') return;
+    if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver((entries) => {
       const width = entries[0]?.contentRect.width;
       if (width && width > 0) {
-        setChartWidth((prev) => (Math.abs(prev - width) < 1 ? prev : Math.round(width)));
+        setChartWidth((prev) =>
+          Math.abs(prev - width) < 1 ? prev : Math.round(width),
+        );
       }
     });
     observer.observe(node);
@@ -132,21 +383,23 @@ export const HistoryChart = memo(function HistoryChart({ history }: HistoryChart
   // reading's semantic type - so a monitor that briefly extracted the
   // wrong text ("$49" one check, "87%" the next) never plots two
   // incomparable units on the same line.
-  const allPoints = useMemo<NumericCheck[]>(() => {
-    const chronological = [...history].reverse();
-    const numeric = chronological.filter(
-      (entry): entry is NumericCheck =>
-        entry.error === null &&
-        entry.semanticValue !== null &&
-        entry.semanticValue.normalized !== null &&
-        Number.isFinite(entry.semanticValue.normalized),
-    );
-    if (numeric.length === 0) return [];
-    const referenceType: SemanticValueType = numeric[numeric.length - 1].semanticValue.type;
-    return numeric.filter((entry) => entry.semanticValue.type === referenceType);
-  }, [history]);
+  const allPoints = useMemo<NumericCheck[]>(
+    () => getChartablePoints(history),
+    [history],
+  );
 
-  const [range, setRange] = useState<RangeKey>(() => pickDefaultRange(allPoints));
+  const [internalRange, setInternalRange] = useState<RangeKey>(() =>
+    pickDefaultRange(allPoints),
+  );
+  const range = propRange ?? internalRange;
+
+  const handleRangeChange = useCallback(
+    (newRange: RangeKey) => {
+      setInternalRange(newRange);
+      onRangeChange?.(newRange);
+    },
+    [onRangeChange],
+  );
 
   const filtered = useMemo(() => {
     const opt = RANGE_OPTIONS.find((o) => o.key === range) ?? RANGE_OPTIONS[0];
@@ -177,40 +430,31 @@ export const HistoryChart = memo(function HistoryChart({ history }: HistoryChart
     const maxT = times[times.length - 1];
     const spanT = maxT - minT || 1;
 
-    const points: ChartPoint[] = filtered.map((entry, idx) => {
+    const points: ChartPoint[] = filtered.map((entry) => {
       const t = entry.checkedAt;
       const v = entry.semanticValue.normalized as number;
       const x = PAD_X + ((t - minT) / spanT) * (chartW - PAD_X * 2);
       const y = PAD_TOP + (1 - (v - minV) / (maxV - minV)) * PLOT_H;
-
-      let changeSummary: string | null = null;
-      if (idx > 0) {
-        const prevEntry = filtered[idx - 1];
-        const change = calculateValueChange(
-          prevEntry.value,
-          prevEntry.semanticValue,
-          entry.value ?? '',
-          entry.semanticValue,
-        );
-        if (change.hasChange) {
-          changeSummary = change.summaryText;
-        }
-      }
-
-      return { x, y, checkedAt: t, raw: entry.value ?? '', changeSummary };
+      return { x, y, checkedAt: t, raw: entry.value ?? "" };
     });
 
-    const linePath = monotonePath(points);
-    const floorY = PAD_TOP + PLOT_H;
-    const areaPath = `${linePath} L ${points[points.length - 1].x.toFixed(2)} ${floorY} L ${points[0].x.toFixed(2)} ${floorY} Z`;
+    const { linePath, segments } = computeSpline(points);
+
+    const firstV = values[0];
+    const lastV = values[values.length - 1];
+    const trend: ChartTrend =
+      lastV > firstV ? "up" : lastV < firstV ? "down" : "flat";
 
     const tickCount = 3;
     const ticks = Array.from({ length: tickCount }, (_, i) => {
       const frac = i / (tickCount - 1);
-      return { x: PAD_X + frac * (chartW - PAD_X * 2), label: formatTick(minT + frac * spanT, range) };
+      return {
+        x: PAD_X + frac * (chartW - PAD_X * 2),
+        label: formatTick(minT + frac * spanT, range),
+      };
     });
 
-    return { points, linePath, areaPath, ticks };
+    return { points, linePath, segments, ticks, trend };
   }, [filtered, range, chartW]);
 
   function handleMove(event: MouseEvent<SVGSVGElement>) {
@@ -218,36 +462,52 @@ export const HistoryChart = memo(function HistoryChart({ history }: HistoryChart
     const rect = event.currentTarget.getBoundingClientRect();
     if (rect.width === 0) return;
     const userX = ((event.clientX - rect.left) / rect.width) * chartW;
-    let nearest = 0;
-    let nearestDist = Infinity;
-    chart.points.forEach((p, i) => {
-      const dist = Math.abs(p.x - userX);
-      if (dist < nearestDist) {
-        nearestDist = dist;
-        nearest = i;
-      }
-    });
-    setHoverIndex(nearest);
+    const minX = chart.points[0].x;
+    const maxX = chart.points[chart.points.length - 1].x;
+    const clampedX = Math.max(minX, Math.min(maxX, userX));
+    const y = getYOnSpline(chart.points, chart.segments, clampedX);
+    const index = nearestPointIndex(chart.points, userX);
+    if (index !== lastAudioIndexRef.current) {
+      lastAudioIndexRef.current = index;
+      const at = Math.max(
+        0,
+        Math.min(1, 1 - (chart.points[index].y - PAD_TOP) / PLOT_H),
+      );
+      playSound("drag", { at, gap: 60 });
+    }
+    setHoverPos({ x: clampedX, y, index });
   }
 
-  const hovered = hoverIndex !== null ? chart?.points[hoverIndex] ?? null : null;
+  function handleLeave() {
+    lastAudioIndexRef.current = null;
+    setHoverPos(null);
+  }
 
-  // Measured on every hover change (not just on mount) since the same
-  // tooltip DOM node persists across hovers - its content (and
-  // therefore its size) changes without ever unmounting, so a
-  // mount-only ref wouldn't re-measure a longer/shorter value or date
-  // as the user moves across points.
-  const tooltipRef = useRef<HTMLDivElement>(null);
-  const [tooltipSize, setTooltipSize] = useState<{ width: number; height: number } | null>(null);
-  useLayoutEffect(() => {
-    if (!hovered) {
-      setTooltipSize(null);
-      return;
-    }
-    const el = tooltipRef.current;
-    if (!el) return;
-    setTooltipSize({ width: el.offsetWidth, height: el.offsetHeight });
-  }, [hovered?.checkedAt, hovered?.raw]);
+  const scrubbed =
+    hoverPos !== null ? (chart?.points[hoverPos.index] ?? null) : null;
+
+  // Surface the exact hovered reading to the parent (which shows it
+  // live in the value header) and report `null` when the pointer
+  // leaves or the reading goes away, so the header falls back to the
+  // latest. `scrubbed` is always a real recorded point or null.
+  useEffect(() => {
+    onScrub?.(
+      scrubbed ? { raw: scrubbed.raw, checkedAt: scrubbed.checkedAt } : null,
+    );
+  }, [scrubbed, onScrub]);
+  // The marker ring sits at the newest reading at rest; while the user
+  // scrubs, it follows continuously along the trend line with the cursor.
+  // Only one marker ring exists at any time.
+  const latest =
+    chart && hoverPos === null ? chart.points[chart.points.length - 1] : null;
+  // Line + rings follow the visible range's overall direction, using the
+  // same up/down register as the value-change text elsewhere in the UI.
+  const trendStrokeClass =
+    chart?.trend === "up"
+      ? "stroke-emerald-600 dark:stroke-emerald-400"
+      : chart?.trend === "down"
+        ? "stroke-red-700 dark:stroke-red-400"
+        : "stroke-foreground/70";
 
   if (history.length === 0) {
     return (
@@ -260,60 +520,27 @@ export const HistoryChart = memo(function HistoryChart({ history }: HistoryChart
   if (allPoints.length < MIN_POINTS_TO_CHART) {
     return (
       <div className="flex flex-col items-center gap-1 py-7 text-center">
-        <p className="text-[11.5px] text-muted-foreground">Not enough numeric readings yet to chart.</p>
-        <p className="text-[10.5px] text-muted-foreground/70">A trend line appears after a few more checks.</p>
+        <p className="text-[11.5px] text-muted-foreground">
+          Not enough numeric readings yet to chart.
+        </p>
+        <p className="text-[10.5px] text-muted-foreground/70">
+          A trend line appears after a few more checks.
+        </p>
       </div>
     );
-  }
-
-  // Pixel-exact clamping (not percentage-based) against the chart's own
-  // real measured width/height, using the tooltip's own measured size -
-  // the only way to guarantee it never extends past the container
-  // regardless of panel width, value length, or date format. Flips
-  // below the point instead of above whenever there isn't enough room
-  // above within the chart itself (a high value near the top of the
-  // plot), rather than letting it go negative and clip.
-  let tooltipLeft = 0;
-  let tooltipTop = 0;
-  if (hovered && tooltipSize) {
-    tooltipLeft = clampNum(
-      hovered.x - tooltipSize.width / 2,
-      TOOLTIP_EDGE_GAP,
-      chartW - tooltipSize.width - TOOLTIP_EDGE_GAP,
-    );
-    const above = hovered.y - tooltipSize.height - TOOLTIP_POINT_GAP;
-    tooltipTop =
-      above >= TOOLTIP_EDGE_GAP
-        ? above
-        : clampNum(hovered.y + TOOLTIP_POINT_GAP, TOOLTIP_EDGE_GAP, CHART_H - tooltipSize.height - TOOLTIP_EDGE_GAP);
   }
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center justify-end">
-        <div className="inline-flex items-center gap-0.5 rounded-md bg-muted p-0.5">
-          {RANGE_OPTIONS.map((opt) => (
-            <button
-              key={opt.key}
-              type="button"
-              onClick={() => setRange(opt.key)}
-              className={cn(
-                'rounded-[5px] px-1.5 py-0.5 text-[10.5px] font-medium transition-colors',
-                range === opt.key
-                  ? 'bg-background text-foreground shadow-sm'
-                  : 'text-muted-foreground hover:text-foreground',
-              )}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
+    <div className="flex flex-col">
       <div ref={measureRef} className="relative overflow-hidden">
         {!chart ? (
-          <div className="flex items-center justify-center" style={{ height: CHART_H }}>
-            <p className="text-[11px] text-muted-foreground">No data in this range</p>
+          <div
+            className="flex items-center justify-center"
+            style={{ height: CHART_H }}
+          >
+            <p className="text-[11px] text-muted-foreground">
+              No data in this range
+            </p>
           </div>
         ) : (
           <div key={range} className="relative">
@@ -322,61 +549,54 @@ export const HistoryChart = memo(function HistoryChart({ history }: HistoryChart
               width="100%"
               height={CHART_H}
               className="block"
+              role="img"
+              aria-label="Value history chart"
               onMouseMove={handleMove}
-              onMouseLeave={() => setHoverIndex(null)}
+              onMouseLeave={handleLeave}
             >
-              <defs>
-                <linearGradient id="historyChartFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="hsl(var(--foreground))" stopOpacity="0.14" />
-                  <stop offset="100%" stopColor="hsl(var(--foreground))" stopOpacity="0" />
-                </linearGradient>
-              </defs>
-
-              {/* Very subtle grid - three reference lines, no numbers (per the minimal-Y-axis brief). */}
-              {[0, 0.5, 1].map((frac) => (
-                <line
-                  key={frac}
-                  x1={0}
-                  x2={chartW}
-                  y1={PAD_TOP + PLOT_H * frac}
-                  y2={PAD_TOP + PLOT_H * frac}
-                  stroke="hsl(var(--border))"
-                  strokeWidth={1}
-                  opacity={0.6}
-                />
-              ))}
-
-              <path d={chart.areaPath} fill="url(#historyChartFill)" className="animate-chart-area" />
               <path
                 d={chart.linePath}
                 fill="none"
-                stroke="hsl(var(--foreground))"
-                strokeOpacity={0.75}
-                strokeWidth={1.75}
+                strokeWidth={2.5}
                 strokeLinecap="round"
                 strokeLinejoin="round"
                 pathLength={1}
-                className="animate-chart-line"
+                className={cn("animate-chart-line", trendStrokeClass)}
               />
 
-              {hovered && (
-                <g className="pointer-events-none">
+              {latest && (
+                <circle
+                  cx={latest.x}
+                  cy={latest.y}
+                  r={5.5}
+                  fill="hsl(var(--background))"
+                  strokeWidth={2.5}
+                  data-testid="history-chart-latest"
+                  className={trendStrokeClass}
+                />
+              )}
+
+              {hoverPos && (
+                <g
+                  className="pointer-events-none"
+                  data-testid="history-chart-guide"
+                >
                   <line
-                    x1={hovered.x}
-                    x2={hovered.x}
+                    x1={hoverPos.x}
+                    x2={hoverPos.x}
                     y1={PAD_TOP}
                     y2={PAD_TOP + PLOT_H}
-                    stroke="hsl(var(--foreground))"
-                    strokeOpacity={0.15}
+                    strokeOpacity={0.45}
                     strokeWidth={1}
+                    className={trendStrokeClass}
                   />
                   <circle
-                    cx={hovered.x}
-                    cy={hovered.y}
-                    r={3.5}
+                    cx={hoverPos.x}
+                    cy={hoverPos.y}
+                    r={5.5}
                     fill="hsl(var(--background))"
-                    stroke="hsl(var(--foreground))"
-                    strokeWidth={1.5}
+                    strokeWidth={2.5}
+                    className={trendStrokeClass}
                   />
                 </g>
               )}
@@ -386,44 +606,53 @@ export const HistoryChart = memo(function HistoryChart({ history }: HistoryChart
                   key={i}
                   x={tick.x}
                   y={CHART_H - 6}
-                  textAnchor={i === 0 ? 'start' : i === chart.ticks.length - 1 ? 'end' : 'middle'}
-                  className="animate-chart-fade fill-muted-foreground"
+                  textAnchor={
+                    i === 0
+                      ? "start"
+                      : i === chart.ticks.length - 1
+                        ? "end"
+                        : "middle"
+                  }
+                  className="animate-chart-fade fill-muted-foreground tabular-nums"
                   style={{ fontSize: 9.5 }}
                 >
                   {tick.label}
                 </text>
               ))}
             </svg>
-
-            {hovered && (
-              <div
-                ref={tooltipRef}
-                className="pointer-events-none absolute z-10 max-w-[85%] whitespace-nowrap rounded-md border border-black/[0.06] bg-popover px-2 py-1.5 shadow-md"
-                // Hidden (rather than positioned at a guessed 0,0) until
-                // its real size has been measured and the fully
-                // edge-clamped position computed - avoids a one-frame
-                // flash of an overflowing tooltip before that math runs.
-                style={
-                  tooltipSize
-                    ? { left: tooltipLeft, top: tooltipTop, visibility: 'visible' }
-                    : { left: 0, top: 0, visibility: 'hidden' }
-                }
-              >
-                <div className="flex items-center gap-1.5">
-                  <p className="truncate text-[12px] font-semibold tabular-nums text-foreground">{hovered.raw}</p>
-                  {hovered.changeSummary && (
-                    <span className="text-[10.5px] font-medium text-muted-foreground">
-                      ({hovered.changeSummary})
-                    </span>
-                  )}
-                </div>
-                <p className="mt-0.5 truncate text-[10px] text-muted-foreground">
-                  {formatDateTime(hovered.checkedAt)}
-                </p>
-              </div>
-            )}
           </div>
         )}
+      </div>
+
+      <div className="mt-2 flex items-center justify-end px-2.5">
+        <div
+          role="group"
+          aria-label="Time range"
+          className="inline-flex items-center gap-0.5 rounded-lg border border-black/[0.04] bg-muted/60 p-0.5 dark:border-white/[0.06]"
+        >
+          {RANGE_OPTIONS.map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              // Switching range re-cuts the visible points, so any
+              // in-flight scrub is dropped and the header falls back
+              // to the latest reading.
+              onClick={() => {
+                handleRangeChange(opt.key);
+                setHoverPos(null);
+              }}
+              aria-pressed={range === opt.key}
+              className={cn(
+                "rounded-md px-2.5 py-0.5 text-[11px] tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                range === opt.key
+                  ? "bg-background font-semibold text-foreground shadow-xs"
+                  : "font-normal text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );

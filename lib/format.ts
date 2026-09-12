@@ -32,3 +32,5 @@ export function formatRelativeTime(timestamp: number): string {
 export function formatDateTime(timestamp: number): string {
   return timeFormatter.format(timestamp);
 }
+
+export { formatAdaptiveValue, formatCompactCount } from './monitors/formatValue';

@@ -1,18 +1,39 @@
-import { buildFingerprint, findLikelyContainer, type ElementFingerprint } from '@/lib/monitors/fingerprint';
-import { locateAndExtract, resolveSettledValue, type LocateAndExtractResult } from '@/lib/monitors/locate';
-import { waitForPageReady, waitForRegionReady, sleep, type ReadinessResult } from '@/lib/monitors/readiness';
-import { resolvePickerTargetAtPoint, formatPickerTooltip, type PickerTarget } from '@/lib/monitors/pickerTarget';
-import { searchByScrolling, type ScrollHost } from '@/lib/monitors/scrollRecovery';
-import { createMonitor } from '@/lib/monitors/store';
-import { resolveSourceUrl } from '@/lib/monitors/itemUrl';
-import { checkMonitorNow } from '@/lib/monitors/client';
-import { detectSemanticValue, extractNumericToken, type SemanticValue } from '@/lib/monitors/semanticValue';
-import { getSettings } from '@/lib/storage';
+import { checkMonitorNow } from "@/lib/monitors/client";
+import {
+  buildFingerprint,
+  findLikelyContainer,
+  type ElementFingerprint,
+} from "@/lib/monitors/fingerprint";
+import { resolveSourceUrl } from "@/lib/monitors/itemUrl";
+import {
+  locateAndExtract,
+  resolveSettledValue,
+  type LocateAndExtractResult,
+} from "@/lib/monitors/locate";
+import {
+  formatPickerTooltip,
+  resolvePickerTargetAtPoint,
+  type PickerTarget,
+} from "@/lib/monitors/pickerTarget";
+import {
+  sleep,
+  waitForPageReady,
+  waitForRegionReady,
+  type ReadinessResult,
+} from "@/lib/monitors/readiness";
+import {
+  searchByScrolling,
+  type ScrollHost,
+} from "@/lib/monitors/scrollRecovery";
+import { type SemanticValue } from "@/lib/monitors/semanticValue";
+import { createMonitor } from "@/lib/monitors/store";
+import { getSettings } from "@/lib/storage";
 
 export interface PickResult {
   /** `true` once a monitor was actually created and saved - not just that a click happened. */
   saved: boolean;
   monitorName: string | null;
+  monitorId?: string | null;
 }
 
 export interface PageAgentLocateOptions {
@@ -49,16 +70,18 @@ export default defineContentScript({
   // host permission for. Declaring `matches` here would make WXT add a
   // broad `<all_urls>` entry to the manifest's `host_permissions`, which
   // defeats the whole incremental-permission model in `lib/permissions`.
-  registration: 'runtime',
-  world: 'ISOLATED',
-  runAt: 'document_idle',
+  registration: "runtime",
+  world: "ISOLATED",
+  runAt: "document_idle",
   main() {
     const api = {
       ready: true,
       pick: runPicker,
       locate: runLocate,
     };
-    (window as unknown as { __monitorPageAgent: typeof api }).__monitorPageAgent = api;
+    (
+      window as unknown as { __monitorPageAgent: typeof api }
+    ).__monitorPageAgent = api;
   },
 });
 
@@ -75,7 +98,10 @@ const PRIMARY_BUDGET_SHARE = 0.6;
 /** Below this, there's not enough budget left for even one meaningful scroll-and-settle round - skip straight to reporting the ordinary outcome rather than starting (and immediately abandoning) a scroll attempt. */
 const MIN_SCROLL_BUDGET_MS = 1_500;
 /** Diagnostics where the element genuinely wasn't found (as opposed to being blocked by auth/automation walls, which scrolling can't fix). */
-const SCROLL_RETRY_CODES = new Set(['ELEMENT_NOT_FOUND', 'SELECTOR_RECOVERY_LOW_CONFIDENCE']);
+const SCROLL_RETRY_CODES = new Set([
+  "ELEMENT_NOT_FOUND",
+  "SELECTOR_RECOVERY_LOW_CONFIDENCE",
+]);
 
 /**
  * Whether scroll recovery may run for this outcome. Reserved for
@@ -85,7 +111,7 @@ const SCROLL_RETRY_CODES = new Set(['ELEMENT_NOT_FOUND', 'SELECTOR_RECOVERY_LOW_
  * page - must never burn budget scrolling. Exported for tests.
  */
 export function shouldAttemptScrollRecovery(
-  fp: Pick<ElementFingerprint, 'itemAnchor'>,
+  fp: Pick<ElementFingerprint, "itemAnchor">,
   diagnosticCode: string,
 ): boolean {
   return Boolean(fp.itemAnchor) && SCROLL_RETRY_CODES.has(diagnosticCode);
@@ -113,7 +139,7 @@ export async function withRestoredScrollY<T>(
 /** Exported for tests (scroll-gate coverage); production calls it via the injected page agent. */
 export async function runLocate(
   fpJson: string,
-  extractMode: 'text' | 'attribute',
+  extractMode: "text" | "attribute",
   attributeName: string | null,
   options?: PageAgentLocateOptions,
 ): Promise<PageAgentLocateResponse> {
@@ -121,10 +147,18 @@ export async function runLocate(
   const totalBudgetMs = options?.maxTotalWaitMs ?? 16_000;
   const start = Date.now();
   const isFeedItem = Boolean(fp.itemAnchor);
-  const primaryBudgetMs = isFeedItem ? Math.round(totalBudgetMs * PRIMARY_BUDGET_SHARE) : totalBudgetMs;
+  const primaryBudgetMs = isFeedItem
+    ? Math.round(totalBudgetMs * PRIMARY_BUDGET_SHARE)
+    : totalBudgetMs;
 
   const read = (): LocateAndExtractResult => {
-    const result = locateAndExtract(document, fp, extractMode, attributeName, window);
+    const result = locateAndExtract(
+      document,
+      fp,
+      extractMode,
+      attributeName,
+      window,
+    );
     // Self-heal the working fingerprint across retries too, not just
     // on the final accepted result - otherwise a relocation found on
     // one attempt would be thrown away and re-discovered from scratch
@@ -154,11 +188,9 @@ export async function runLocate(
     return waitForPageReady(window, { maxWaitMs });
   };
 
-  let outcome = await resolveSettledValue(
-    waitForReady,
-    read,
-    { maxTotalWaitMs: primaryBudgetMs },
-  );
+  let outcome = await resolveSettledValue(waitForReady, read, {
+    maxTotalWaitMs: primaryBudgetMs,
+  });
 
   // Both conditions: the monitor must have started as a feed item
   // (healed fingerprints re-derive their anchor from wherever recovery
@@ -250,10 +282,10 @@ async function maybeRecoverByScrolling(
  */
 async function runPicker(): Promise<PickResult> {
   const settings = await getSettings();
-  const isDark = settings.ok && settings.value.theme === 'dark';
+  const isDark = settings.ok && settings.value.theme === "dark";
   return new Promise((resolve) => {
     const previousCursor = document.documentElement.style.cursor;
-    document.documentElement.style.cursor = 'crosshair';
+    document.documentElement.style.cursor = "crosshair";
 
     // Same grayscale palette as styles/globals.css (--foreground,
     // --muted-foreground, --border, --muted) - the picker is injected
@@ -262,22 +294,22 @@ async function runPicker(): Promise<PickResult> {
     // in lockstep with the app's tokens so the on-page UI reads as the
     // same product as the panel, not a bolted-on tool.
     const FONT = `-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,sans-serif`;
-    const FOREGROUND = isDark ? '#edf0f4' : '#171717';
-    const MUTED_FOREGROUND = isDark ? '#a4acb8' : '#737373';
-    const BORDER = isDark ? 'rgba(255,255,255,0.13)' : 'rgba(0,0,0,0.08)';
-    const SURFACE = isDark ? 'rgba(35,38,43,0.92)' : 'rgba(255,255,255,0.92)';
-    const SURFACE_SOLID = isDark ? '#23262b' : '#ffffff';
-    const MUTED_FILL = isDark ? '#30343a' : '#f5f5f5';
+    const FOREGROUND = isDark ? "#edf0f4" : "#171717";
+    const MUTED_FOREGROUND = isDark ? "#a4acb8" : "#737373";
+    const BORDER = isDark ? "rgba(255,255,255,0.13)" : "rgba(0,0,0,0.08)";
+    const SURFACE = isDark ? "rgba(35,38,43,0.92)" : "rgba(255,255,255,0.92)";
+    const SURFACE_SOLID = isDark ? "#23262b" : "#ffffff";
+    const MUTED_FILL = isDark ? "#30343a" : "#f5f5f5";
     // A touch darker than MUTED_FILL, used only for the naming form's
     // "No, keep it" button hover - matches --accent in styles/globals.css.
-    const ACCENT_FILL = isDark ? '#3b4047' : '#f0f0f0';
+    const ACCENT_FILL = isDark ? "#3b4047" : "#f0f0f0";
     // Translucent overlay of FOREGROUND, same alpha-overlay convention
     // as BORDER/ACCENT_FILL above (this UI paints over arbitrary page
     // backgrounds, so tokens here are alpha overlays rather than the
     // app's own solid --ring hex). Used for the input's focus glow and
     // the buttons' focus-visible ring - the on-page equivalent of the
     // app's `focus-visible:ring-2 ring-ring ring-offset-2` recipe.
-    const RING = isDark ? 'rgba(237,240,244,0.35)' : 'rgba(23,23,23,0.22)';
+    const RING = isDark ? "rgba(237,240,244,0.35)" : "rgba(23,23,23,0.22)";
 
     // Every on-page picker element (highlight box, tooltip, naming
     // form) lives inside its own closed shadow root instead of being
@@ -291,16 +323,16 @@ async function runPicker(): Promise<PickResult> {
     // scope too. A shadow boundary closes off both directions, so the
     // picker looks and behaves identically on every site instead of
     // depending on what CSS that particular page happens to ship.
-    const host = document.createElement('div');
+    const host = document.createElement("div");
     const hostStyle = host.style;
-    hostStyle.setProperty('all', 'initial', 'important');
-    hostStyle.setProperty('display', 'block', 'important');
-    hostStyle.setProperty('position', 'static', 'important');
-    hostStyle.setProperty('width', '0', 'important');
-    hostStyle.setProperty('height', '0', 'important');
-    hostStyle.setProperty('margin', '0', 'important');
-    hostStyle.setProperty('padding', '0', 'important');
-    hostStyle.setProperty('overflow', 'visible', 'important');
+    hostStyle.setProperty("all", "initial", "important");
+    hostStyle.setProperty("display", "block", "important");
+    hostStyle.setProperty("position", "static", "important");
+    hostStyle.setProperty("width", "0", "important");
+    hostStyle.setProperty("height", "0", "important");
+    hostStyle.setProperty("margin", "0", "important");
+    hostStyle.setProperty("padding", "0", "important");
+    hostStyle.setProperty("overflow", "visible", "important");
     document.documentElement.appendChild(host);
     // 'open', not 'closed' like the main panel: the naming step's
     // outside-click detection (below) has to run from a `document`
@@ -316,7 +348,7 @@ async function runPicker(): Promise<PickResult> {
     // only gives a page script the ability to inspect this transient
     // picker UI's markup while it's on screen, which isn't a concern
     // here the way it would be for the panel's persisted monitor data.
-    const shadow = host.attachShadow({ mode: 'open' });
+    const shadow = host.attachShadow({ mode: "open" });
 
     // Same top-layer promotion the panel uses, and for the same
     // reason: an ancestor anywhere above this host with a `transform`,
@@ -325,8 +357,8 @@ async function runPicker(): Promise<PickResult> {
     // ancestor's box instead of the real viewport. Feature-detected -
     // the fixed/inset styles already work correctly without it, just
     // not immune to that one class of interference.
-    if (typeof host.showPopover === 'function') {
-      host.setAttribute('popover', 'manual');
+    if (typeof host.showPopover === "function") {
+      host.setAttribute("popover", "manual");
       try {
         host.showPopover();
       } catch {
@@ -339,7 +371,7 @@ async function runPicker(): Promise<PickResult> {
     // express - :focus/:hover/:active states and the entrance keyframe
     // - scoped to the shadow root so it can never collide with (or be
     // collided into by) the host page's own classes or stylesheet.
-    const styleTag = document.createElement('style');
+    const styleTag = document.createElement("style");
     styleTag.textContent = `
       @keyframes __monitorext-in {
         from { opacity: 0; transform: translateY(4px) scale(0.98); }
@@ -358,7 +390,7 @@ async function runPicker(): Promise<PickResult> {
       .__monitorext-btn:focus-visible { outline: none; box-shadow: 0 0 0 2px ${SURFACE_SOLID}, 0 0 0 4px ${RING}; }
       .__monitorext-btn:active:not(:disabled) { transform: scale(0.97); }
       .__monitorext-btn-cancel:hover:not(:disabled) { background-color: ${ACCENT_FILL} !important; }
-      .__monitorext-btn-save:hover:not(:disabled) { background-color: ${isDark ? '#ffffff' : '#000'} !important; color: ${isDark ? '#171717' : '#ffffff'} !important; }
+      .__monitorext-btn-save:hover:not(:disabled) { background-color: ${isDark ? "#ffffff" : "#000"} !important; color: ${isDark ? "#171717" : "#ffffff"} !important; }
       .__monitorext-btn-save:disabled { opacity: 0.4; cursor: default; }
     `;
     shadow.appendChild(styleTag);
@@ -366,31 +398,31 @@ async function runPicker(): Promise<PickResult> {
     // The highlight box traced around the hovered element. Rounded,
     // softly shadowed rather than a hard line, so it reads as a gentle
     // focus ring instead of a debugger's inspect overlay.
-    const overlay = document.createElement('div');
+    const overlay = document.createElement("div");
     overlay.style.cssText =
-      'position:fixed;pointer-events:none;z-index:2147483647;' +
+      "position:fixed;pointer-events:none;z-index:2147483647;" +
       `border:2px solid ${FOREGROUND};background:rgba(23,23,23,0.045);` +
-      'box-shadow:0 0 0 4px rgba(23,23,23,0.045);' +
-      'border-radius:6px;display:none;' +
-      'transition:top 100ms cubic-bezier(0.22,1,0.36,1),left 100ms cubic-bezier(0.22,1,0.36,1),' +
-      'width 100ms cubic-bezier(0.22,1,0.36,1),height 100ms cubic-bezier(0.22,1,0.36,1),' +
-      'border-color 120ms ease-out,background-color 120ms ease-out;';
+      "box-shadow:0 0 0 4px rgba(23,23,23,0.045);" +
+      "border-radius:6px;display:none;" +
+      "transition:top 100ms cubic-bezier(0.22,1,0.36,1),left 100ms cubic-bezier(0.22,1,0.36,1)," +
+      "width 100ms cubic-bezier(0.22,1,0.36,1),height 100ms cubic-bezier(0.22,1,0.36,1)," +
+      "border-color 120ms ease-out,background-color 120ms ease-out;";
     shadow.appendChild(overlay);
 
     // The cursor-following hint. Frosted white to match the panel's own
     // surface (bg-background + its shadow recipe) instead of the flat
     // black chip this used to be - the same material reused at a
     // smaller size, not a separate visual language.
-    const tooltip = document.createElement('div');
+    const tooltip = document.createElement("div");
     tooltip.style.cssText =
-      'position:fixed;pointer-events:none;z-index:2147483647;' +
+      "position:fixed;pointer-events:none;z-index:2147483647;" +
       `background:${SURFACE};backdrop-filter:blur(20px) saturate(180%);-webkit-backdrop-filter:blur(20px) saturate(180%);` +
       `border:0.5px solid ${BORDER};` +
       `color:${FOREGROUND};font:500 12px/1.5 ${FONT};` +
-      'padding:5px 10px;border-radius:8px;display:none;' +
-      'max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
-      'box-shadow:0 12px 28px -6px rgba(0,0,0,0.18),0 2px 6px rgba(0,0,0,0.06);' +
-      'transition:opacity 100ms ease-out;';
+      "padding:5px 10px;border-radius:8px;display:none;" +
+      "max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" +
+      "box-shadow:0 12px 28px -6px rgba(0,0,0,0.18),0 2px 6px rgba(0,0,0,0.06);" +
+      "transition:opacity 100ms ease-out;";
     shadow.appendChild(tooltip);
 
     let currentTarget: PickerTarget | null = null;
@@ -416,7 +448,9 @@ async function runPicker(): Promise<PickResult> {
       useCapture = false,
     ): void {
       target.addEventListener(type, handler as EventListener, useCapture);
-      teardownFns.push(() => target.removeEventListener(type, handler as EventListener, useCapture));
+      teardownFns.push(() =>
+        target.removeEventListener(type, handler as EventListener, useCapture),
+      );
     }
 
     /**
@@ -450,36 +484,46 @@ async function runPicker(): Promise<PickResult> {
     }
 
     function showValid(target: PickerTarget): void {
-      const rect = target.range?.getBoundingClientRect() ?? target.element.getBoundingClientRect();
-      overlay.style.display = 'block';
+      const rect =
+        target.range?.getBoundingClientRect() ??
+        target.element.getBoundingClientRect();
+      overlay.style.display = "block";
       overlay.style.borderColor = FOREGROUND;
-      overlay.style.borderStyle = target.isAmbiguous ? 'dashed' : 'solid';
-      overlay.style.background = target.isAmbiguous ? 'rgba(23,23,23,0.02)' : 'rgba(23,23,23,0.045)';
+      overlay.style.borderStyle = target.isAmbiguous ? "dashed" : "solid";
+      overlay.style.background = target.isAmbiguous
+        ? "rgba(23,23,23,0.02)"
+        : "rgba(23,23,23,0.045)";
       overlay.style.top = `${rect.top}px`;
       overlay.style.left = `${rect.left}px`;
       overlay.style.width = `${rect.width}px`;
       overlay.style.height = `${rect.height}px`;
 
-      tooltip.style.display = 'block';
+      tooltip.style.display = "block";
       tooltip.style.color = FOREGROUND;
       tooltip.textContent = formatPickerTooltip(target);
-      document.documentElement.style.cursor = target.isAmbiguous ? 'help' : 'crosshair';
+      document.documentElement.style.cursor = target.isAmbiguous
+        ? "help"
+        : "crosshair";
     }
 
     function showInvalid(): void {
       // No highlight box at all — its absence is the "this isn't
       // selectable" signal, on top of the tooltip explaining why.
-      overlay.style.display = 'none';
-      tooltip.style.display = 'block';
+      overlay.style.display = "none";
+      tooltip.style.display = "block";
       tooltip.style.color = MUTED_FOREGROUND;
-      tooltip.textContent = '✕ Not a readable value';
-      document.documentElement.style.cursor = 'not-allowed';
+      tooltip.textContent = "✕ Not a readable value";
+      document.documentElement.style.cursor = "not-allowed";
     }
 
     function onMouseMove(event: MouseEvent): void {
       positionTooltip(event.clientX, event.clientY);
 
-      const resolved = resolvePickerTargetAtPoint(document, event.clientX, event.clientY);
+      const resolved = resolvePickerTargetAtPoint(
+        document,
+        event.clientX,
+        event.clientY,
+      );
       if (resolved) {
         currentTarget = resolved;
         showValid(resolved);
@@ -501,7 +545,11 @@ async function runPicker(): Promise<PickResult> {
       if (!currentTarget) return;
 
       const target = currentTarget;
-      const resolved = resolvePickerTargetAtPoint(document, event.clientX, event.clientY);
+      const resolved = resolvePickerTargetAtPoint(
+        document,
+        event.clientX,
+        event.clientY,
+      );
       // Re-resolve at click time rather than trusting the hover state:
       // cheap, and guards against the rare case of the DOM changing
       // between the last mousemove and this click.
@@ -532,12 +580,16 @@ async function runPicker(): Promise<PickResult> {
       // rationale. `fingerprint` itself is plain structural/context
       // data (no DOM node or Range), so holding onto it through the
       // whole naming step is safe.
-      const fingerprint = buildFingerprint(resolved.element, window, resolved.textAnchor);
+      const fingerprint = buildFingerprint(
+        resolved.element,
+        window,
+        resolved.textAnchor,
+      );
       promptForName(resolved, fingerprint);
     }
 
     function onKeyDown(event: KeyboardEvent): void {
-      if (event.key !== 'Escape' || settled) return;
+      if (event.key !== "Escape" || settled) return;
       settled = true;
       cleanup();
       resolve({ saved: false, monitorName: null });
@@ -550,7 +602,10 @@ async function runPicker(): Promise<PickResult> {
      * this is submitted — Escape, the "No, keep it" button, or a click
      * outside the field all back out with nothing created.
      */
-    function promptForName(resolved: PickerTarget, fingerprint: ElementFingerprint): void {
+    function promptForName(
+      resolved: PickerTarget,
+      fingerprint: ElementFingerprint,
+    ): void {
       // Done hovering - only the (now-pinned) highlight remains behind
       // the naming field.
       for (const off of teardownFns.splice(0)) off();
@@ -567,27 +622,27 @@ async function runPicker(): Promise<PickResult> {
       // (`rounded-lg`); button/input radius below matches its Button
       // and Input components (`rounded-md`) - same tokens, not a new
       // design system.
-      const form = document.createElement('div');
+      const form = document.createElement("div");
       form.style.cssText =
         `position:fixed;z-index:2147483647;width:${FORM_WIDTH}px;box-sizing:border-box;` +
         `background:${SURFACE_SOLID};` +
         `color:${FOREGROUND};font:14px/1.4 ${FONT};` +
         `border:1px solid ${BORDER};` +
-        'padding:16px;border-radius:10px;' +
-        'box-shadow:0 24px 60px -12px rgba(0,0,0,0.28),0 4px 16px rgba(0,0,0,0.08);' +
-        'display:flex;flex-direction:column;gap:12px;' +
-        'animation:__monitorext-in 180ms cubic-bezier(0.22,1,0.36,1);';
+        "padding:16px;border-radius:10px;" +
+        "box-shadow:0 24px 60px -12px rgba(0,0,0,0.28),0 4px 16px rgba(0,0,0,0.08);" +
+        "display:flex;flex-direction:column;gap:12px;" +
+        "animation:__monitorext-in 180ms cubic-bezier(0.22,1,0.36,1);";
 
-      const header = document.createElement('div');
-      header.style.cssText = 'display:flex;flex-direction:column;gap:3px;';
+      const header = document.createElement("div");
+      header.style.cssText = "display:flex;flex-direction:column;gap:3px;";
 
-      const titleEl = document.createElement('div');
-      titleEl.textContent = 'Name this monitor';
+      const titleEl = document.createElement("div");
+      titleEl.textContent = "Name this monitor";
       titleEl.style.cssText = `font-size:14px;font-weight:600;letter-spacing:-0.01em;color:${FOREGROUND};`;
       header.appendChild(titleEl);
 
-      const descriptionEl = document.createElement('div');
-      descriptionEl.textContent = 'Give this monitor a name.';
+      const descriptionEl = document.createElement("div");
+      descriptionEl.textContent = "Give this monitor a name.";
       descriptionEl.style.cssText = `font-size:12px;line-height:1.5;color:${MUTED_FOREGROUND};`;
       header.appendChild(descriptionEl);
 
@@ -597,29 +652,29 @@ async function runPicker(): Promise<PickResult> {
       // last chance to catch a hover/click mismatch (the tooltip already
       // scrolled away with the cursor). Compact and muted like the
       // description above it, ellipsized rather than wrapped.
-      const valuePreview = document.createElement('div');
+      const valuePreview = document.createElement("div");
       valuePreview.textContent = namingValuePreview(resolved);
       valuePreview.style.cssText =
         `font-size:12px;line-height:1.5;color:${MUTED_FOREGROUND};` +
-        'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
       form.appendChild(valuePreview);
 
-      const input = document.createElement('input');
-      input.type = 'text';
+      const input = document.createElement("input");
+      input.type = "text";
       // Leave the field empty by default so naming is always an
       // explicit choice instead of silently reusing a guessed label.
-      input.value = '';
+      input.value = "";
       input.maxLength = 80;
       input.spellcheck = false;
-      input.className = '__monitorext-input';
+      input.className = "__monitorext-input";
       input.style.cssText =
         `width:100%;box-sizing:border-box;background:${SURFACE_SOLID};color:${FOREGROUND};` +
         `border:1px solid ${BORDER};border-radius:8px;padding:8px 10px;` +
         `font:13px ${FONT};outline:none;`;
       form.appendChild(input);
 
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;gap:8px;justify-content:flex-end;";
 
       // Height (28px), radius (8px), and type weight (12px/500) match
       // the panel's own "Add" button (`h-7`, its Button component's
@@ -627,19 +682,19 @@ async function runPicker(): Promise<PickResult> {
       // reads as the same product as the extension's own UI.
       const BUTTON_STYLE =
         `height:28px;border-radius:8px;padding:0 14px;font:500 12px/1 ${FONT};` +
-        'border:none;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;';
+        "border:none;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;";
 
-      const cancelButton = document.createElement('button');
-      cancelButton.type = 'button';
-      cancelButton.textContent = 'No, keep it';
-      cancelButton.className = '__monitorext-btn __monitorext-btn-cancel';
+      const cancelButton = document.createElement("button");
+      cancelButton.type = "button";
+      cancelButton.textContent = "No, keep it";
+      cancelButton.className = "__monitorext-btn __monitorext-btn-cancel";
       cancelButton.style.cssText = `${BUTTON_STYLE}background:${MUTED_FILL};color:${FOREGROUND};`;
 
-      const saveButton = document.createElement('button');
-      saveButton.type = 'button';
-      saveButton.textContent = 'Save';
-      saveButton.className = '__monitorext-btn __monitorext-btn-save';
-      saveButton.style.cssText = `${BUTTON_STYLE}background:${FOREGROUND};color:${isDark ? '#171717' : '#fff'};`;
+      const saveButton = document.createElement("button");
+      saveButton.type = "button";
+      saveButton.textContent = "Save";
+      saveButton.className = "__monitorext-btn __monitorext-btn-save";
+      saveButton.style.cssText = `${BUTTON_STYLE}background:${FOREGROUND};color:${isDark ? "#171717" : "#fff"};`;
 
       row.appendChild(cancelButton);
       row.appendChild(saveButton);
@@ -651,14 +706,14 @@ async function runPicker(): Promise<PickResult> {
         if (cleanedUp) return;
         form.remove();
         cleanup();
-        resolve({ saved: false, monitorName: null });
+        resolve({ saved: false, monitorName: null, monitorId: null });
       }
 
       async function commit(): Promise<void> {
         if (cleanedUp || saveButton.disabled) return;
         const name = input.value.trim();
         saveButton.disabled = true;
-        saveButton.textContent = 'Saving…';
+        saveButton.textContent = "Saving…";
 
         // `fingerprint` was captured back in onClick, the moment the
         // target was confirmed - not re-derived here. See the call
@@ -673,41 +728,41 @@ async function runPicker(): Promise<PickResult> {
           // every check already navigates to for the same reason.
           url: resolveSourceUrl(window.location.href, fingerprint.itemAnchor),
           fingerprint,
-          extractMode: 'text',
+          extractMode: "text",
         });
 
         if (!created.ok) {
           // Saving failed (e.g. a storage write error) - let the user
           // fix the name or just try again rather than losing the pick.
           saveButton.disabled = false;
-          saveButton.textContent = 'Save';
+          saveButton.textContent = "Save";
           return;
         }
 
         form.remove();
         cleanup();
-        resolve({ saved: true, monitorName: created.value.name });
+        resolve({ saved: true, monitorName: created.value.name, monitorId: created.value.id });
 
         // Not awaited: the monitor is already saved and visible; this
         // just fills in a real value sooner than the next scheduled tick.
         void checkMonitorNow(created.value.id).catch((cause) => {
-          console.error('[pageAgent] Initial check failed:', cause);
+          console.error("[pageAgent] Initial check failed:", cause);
         });
       }
 
-      on(form, 'keydown', (event) => {
-        if (event.key === 'Enter') {
+      on(form, "keydown", (event) => {
+        if (event.key === "Enter") {
           event.preventDefault();
           void commit();
-        } else if (event.key === 'Escape') {
+        } else if (event.key === "Escape") {
           event.preventDefault();
           cancelNaming();
         }
         // Every other key (including plain typing) is left alone so the
         // field behaves like a normal text input.
       });
-      on(cancelButton, 'click', cancelNaming);
-      on(saveButton, 'click', () => void commit());
+      on(cancelButton, "click", cancelNaming);
+      on(saveButton, "click", () => void commit());
       // `mousedown`, not `click`, so this can't race the input's own
       // focus-on-mousedown and misfire as "outside" on the very click
       // that opened the field.
@@ -725,7 +780,7 @@ async function runPicker(): Promise<PickResult> {
       // outside.
       on(
         document,
-        'mousedown',
+        "mousedown",
         (event) => {
           if (!event.composedPath().includes(form)) cancelNaming();
         },
@@ -735,9 +790,9 @@ async function runPicker(): Promise<PickResult> {
       input.focus();
     }
 
-    on(document, 'mousemove', onMouseMove, true);
-    on(document, 'click', onClick, true);
-    on(document, 'keydown', onKeyDown, true);
+    on(document, "mousemove", onMouseMove, true);
+    on(document, "click", onClick, true);
+    on(document, "keydown", onKeyDown, true);
   });
 }
 
@@ -769,7 +824,8 @@ export function sameSelection(a: PickerTarget, b: PickerTarget): boolean {
     return false;
   }
   if (!a.element.isConnected) return true;
-  if (a.element.contains(b.element) || b.element.contains(a.element)) return true;
+  if (a.element.contains(b.element) || b.element.contains(a.element))
+    return true;
   return sameScreenPosition(a.element, b.element);
 }
 
@@ -797,15 +853,18 @@ function positionForm(form: HTMLDivElement, target: Element): void {
   const rect = target.getBoundingClientRect();
   const MARGIN = 8;
 
-  const left = Math.min(Math.max(rect.left, MARGIN), window.innerWidth - FORM_WIDTH - MARGIN);
+  const left = Math.min(
+    Math.max(rect.left, MARGIN),
+    window.innerWidth - FORM_WIDTH - MARGIN,
+  );
   form.style.left = `${left}px`;
 
   const spaceBelow = window.innerHeight - rect.bottom;
   if (spaceBelow < 200) {
-    form.style.top = 'auto';
+    form.style.top = "auto";
     form.style.bottom = `${window.innerHeight - rect.top + MARGIN}px`;
   } else {
     form.style.top = `${rect.bottom + MARGIN}px`;
-    form.style.bottom = 'auto';
+    form.style.bottom = "auto";
   }
 }

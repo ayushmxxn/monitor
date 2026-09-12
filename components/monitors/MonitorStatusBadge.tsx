@@ -44,12 +44,15 @@ export function MonitorStatusBadge({
   status,
   diagnosticCode,
   lastError,
+  stageText,
 }: {
   status: MonitorStatus;
   /** The monitor's last diagnostic code, if any. */
   diagnosticCode?: DiagnosticCode | null;
   /** The monitor's last error message, if any. */
   lastError?: string | null;
+  /** Meaningful progress/status text when status is 'checking'. */
+  stageText?: string | null;
 }) {
   if (status === 'error') {
     const failure = getFailureStateInfo(diagnosticCode, lastError);
@@ -79,10 +82,11 @@ export function MonitorStatusBadge({
   }
 
   const config = STATUS_CONFIG[status];
+  const label = status === 'checking' && stageText ? stageText : config.label;
   return (
     <Badge variant="outline" className={cn('gap-1', config.className)}>
       {config.icon}
-      {config.label}
+      {label}
     </Badge>
   );
 }

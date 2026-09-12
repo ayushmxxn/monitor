@@ -10,7 +10,7 @@
     "zip": "wxt zip",
     "compile": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test": "bun test/safetyNet.test.ts && bun test/pipeline.test.ts && bun test/historyChart.test.ts",
+    "test": "bun test/safetyNet.test.ts && bun test/pipeline.test.ts && bun test/historyChart.test.ts && bun test/adaptiveFormat.test.ts && bun test/numberPopIn.test.tsx && bun test/confettiBurst.test.tsx && bun test/checkStage.test.tsx",
     "test:safety": "bun test/safetyNet.test.ts",
     "test:chart": "bun test/historyChart.test.ts",
     "postinstall": "wxt prepare"

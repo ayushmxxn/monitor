@@ -14,6 +14,7 @@ import {
   Check,
   ChevronDown,
   Globe,
+  Link2,
   Loader2,
   MousePointerClick,
   RefreshCw,
@@ -39,6 +40,7 @@ import { useAppInfo } from '@/hooks/useAppInfo';
 import { checkAllMonitorsNow } from '@/lib/monitors/client';
 import { panelWidthItem, settingsItem } from '@/lib/storage/items';
 import { PortalContainerContext } from '@/lib/portalContainer';
+import { ConfettiBurst, type ConfettiBurstHandle } from '@/components/ui/ConfettiBurst';
 import { cn } from '@/lib/utils';
 import { APP_NAME } from '@/lib/constants';
 
@@ -311,13 +313,43 @@ function PanelContent({
   // (see handleStartPicker below); without this, saving would leave
   // the user looking at a bare page with no on-screen confirmation
   // that anything happened until they went and reopened it themselves.
+  const confettiRef = useRef<ConfettiBurstHandle | null>(null);
+  const pendingFirstCheckIdsRef = useRef<Set<string>>(new Set());
+
   const handlePickerFinished = useCallback(
-    () => {
+    (result?: { saved: boolean; monitorName: string | null; monitorId?: string | null }) => {
       onOpen();
+      if (result?.saved) {
+        if (result.monitorId) {
+          const currentMonitor = monitors.find((m) => m.id === result.monitorId);
+          if (currentMonitor && currentMonitor.lastValue !== null && currentMonitor.lastStatus !== 'error') {
+            confettiRef.current?.burst();
+          } else {
+            pendingFirstCheckIdsRef.current.add(result.monitorId);
+          }
+        }
+      }
     },
-    [onOpen],
+    [onOpen, monitors],
   );
   const picker = useElementPicker(handlePickerFinished);
+
+  // Confetti trigger: ONLY when a newly created monitor successfully completes
+  // its first check and the actual value becomes visible.
+  useEffect(() => {
+    if (isLoading || pendingFirstCheckIdsRef.current.size === 0) return;
+
+    for (const monitor of monitors) {
+      if (pendingFirstCheckIdsRef.current.has(monitor.id)) {
+        if (monitor.lastValue !== null && monitor.lastStatus !== 'error') {
+          pendingFirstCheckIdsRef.current.delete(monitor.id);
+          confettiRef.current?.burst();
+        } else if (monitor.lastStatus === 'error') {
+          pendingFirstCheckIdsRef.current.delete(monitor.id);
+        }
+      }
+    }
+  }, [monitors, isLoading]);
   const { state: pageAccess, retry: retryPageAccess } = usePageAccess();
   const [view, setView] = useState<PanelView>('monitors');
   const [selectedMonitorId, setSelectedMonitorId] = useState<string | null>(null);
@@ -464,14 +496,15 @@ function PanelContent({
         // No `border-l`: the resize handle already renders its own
         // hairline on the left edge (see the separator below), so a
         // full `border` here would double it up as two adjacent lines.
-        'border-y border-r border-black/[0.08] bg-background text-foreground',
-        'shadow-[0_1px_1px_rgba(0,0,0,0.03),0_12px_28px_-8px_rgba(0,0,0,0.22),0_32px_64px_-24px_rgba(0,0,0,0.28)]',
+        'border-y border-r border-black/[0.08] dark:border-white/[0.08] bg-background text-foreground',
+        'shadow-[0_1px_1px_rgba(0,0,0,0.03),0_12px_28px_-8px_rgba(0,0,0,0.22),0_32px_64px_-24px_rgba(0,0,0,0.28)] dark:shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_16px_36px_-6px_rgba(0,0,0,0.7),0_32px_64px_-16px_rgba(0,0,0,0.85)]',
         'transition-transform duration-200',
         !isOpen && 'translate-x-[calc(100%+20px)]',
         isDragging.current && 'transition-none',
         settings.theme === 'dark' && 'dark',
       )}
     >
+      <ConfettiBurst ref={confettiRef} />
       {/* Resize handle - a hit target along the panel's left edge, kept fully inside the rounded box so it doesn't get clipped. The hairline itself is transparent until hovered so the panel reads as a clean, borderless edge at rest - it only reveals itself as an affordance once the cursor is actually there to use it. */}
       <div
         onPointerDown={handleResizeStart}
@@ -649,15 +682,30 @@ function PanelContent({
         </main>
 
         <footer className="flex h-9 shrink-0 items-center justify-between gap-2 border-t border-border px-3.5">
-          <span className="flex min-w-0 items-center truncate text-[11px] leading-none text-muted-foreground">
-            {view === 'settings'
-              ? `${APP_NAME}${appInfo ? ` v${appInfo.version}` : ''}`
-              : view === 'detail'
-                ? (selectedMonitor?.url ? getMonitorHostname(selectedMonitor.url) ?? 'Monitor detail' : 'Monitor detail')
-                : isLoading
-                  ? 'Loading…'
-                  : `${filteredMonitors.length} monitor${filteredMonitors.length === 1 ? '' : 's'}`}
-          </span>
+          {view === 'detail' && selectedMonitor?.url ? (
+            <a
+              href={selectedMonitor.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex min-w-0 items-center gap-1.5 rounded-sm text-[11px] leading-none text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            >
+              <Favicon url={selectedMonitor.url} size={11} />
+              <span className="truncate">
+                {getMonitorHostname(selectedMonitor.url) ?? selectedMonitor.url}
+              </span>
+              <Link2 className="h-3 w-3 shrink-0 opacity-60" />
+            </a>
+          ) : (
+            <span className="flex min-w-0 items-center truncate text-[11px] leading-none text-muted-foreground">
+              {view === 'settings'
+                ? `${APP_NAME}${appInfo ? ` v${appInfo.version}` : ''}`
+                : view === 'detail'
+                  ? 'Monitor detail'
+                  : isLoading
+                    ? 'Loading…'
+                    : `${filteredMonitors.length} monitor${filteredMonitors.length === 1 ? '' : 's'}`}
+            </span>
+          )}
           {view === 'settings' && <CreatorCredit />}
           {view === 'monitors' && !isLoading && (
             <SourceFilterDropdown

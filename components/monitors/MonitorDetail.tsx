@@ -1,22 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Check,
-  ChevronDown,
-  ExternalLink,
-  Loader2,
-  MoreHorizontal,
-  Pause,
-  Pencil,
-  Play,
-  RefreshCw,
-  Trash2,
-  X,
-} from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Separator } from '@/components/ui/separator';
-import { Skeleton } from '@/components/ui/skeleton';
-import { Badge } from '@/components/ui/badge';
+import { InlineNotice } from "@/components/layout/InlineNotice";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogClose,
@@ -26,32 +10,54 @@ import {
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-} from '@/components/ui/dialog';
-import { InlineNotice } from '@/components/layout/InlineNotice';
-import { Favicon } from '@/components/layout/Favicon';
-import { MonitorStatusBadge } from './MonitorStatusBadge';
-import { SemanticValueBadge } from './SemanticValueBadge';
-import { CURRENCY_SYMBOLS } from '@/lib/monitors/semanticValue';
-import { HistoryChart } from './HistoryChart';
-import { DeleteMonitorDialog } from './DeleteMonitorDialog';
-import { useMonitor } from '@/hooks/useMonitor';
-import { useMonitorHistory } from '@/hooks/useMonitorHistory';
-import { useIsChecking } from '@/hooks/useIsChecking';
-import { checkMonitorNow } from '@/lib/monitors/client';
-import { deleteMonitor, updateMonitor } from '@/lib/monitors/store';
-import { sendMessage } from '@/lib/messaging';
-import { formatIntervalMinutes } from '@/lib/monitors/intervals';
-import { formatDateTime, formatRelativeTime } from '@/lib/format';
-import { isTemporaryPageState, getFailureStateInfo } from '@/lib/monitors/diagnostics';
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
+import { SpinningCounter } from "@/components/ui/SpinningCounter";
+import { useIsChecking } from "@/hooks/useIsChecking";
+import { useCheckStage } from "@/hooks/useCheckStage";
+import { useMonitor } from "@/hooks/useMonitor";
+import { useMonitorHistory } from "@/hooks/useMonitorHistory";
+import { formatDateTime, formatRelativeTime } from "@/lib/format";
+import { sendMessage } from "@/lib/messaging";
+import { formatAlertConditionDescription } from "@/lib/monitors/alertCondition";
+import { calculateHistoricalBenchmarks } from "@/lib/monitors/benchmarks";
 import {
   calculateValueChange,
   formatHeroMovement,
-  type ValueChangeSummary,
-} from '@/lib/monitors/changeSummary';
-import { calculateHistoricalBenchmarks } from '@/lib/monitors/benchmarks';
-import { formatAlertConditionDescription } from '@/lib/monitors/alertCondition';
-import type { AlertCondition, AlertConditionType } from '@/lib/monitors/types';
-import { cn } from '@/lib/utils';
+} from "@/lib/monitors/changeSummary";
+import { checkMonitorNow } from "@/lib/monitors/client";
+import {
+  getFailureStateInfo,
+  isTemporaryPageState,
+} from "@/lib/monitors/diagnostics";
+import { formatIntervalMinutes } from "@/lib/monitors/intervals";
+import { CURRENCY_SYMBOLS } from "@/lib/monitors/semanticValue";
+import { deleteMonitor, updateMonitor } from "@/lib/monitors/store";
+import type { AlertCondition, AlertConditionType } from "@/lib/monitors/types";
+import { cn } from "@/lib/utils";
+import {
+  Check,
+  ChevronDown,
+  Loader2,
+  MoreHorizontal,
+  Pause,
+  Pencil,
+  Play,
+  Trash2,
+} from "lucide-react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { DeleteMonitorDialog } from "./DeleteMonitorDialog";
+import {
+  HistoryChart,
+  MIN_POINTS_TO_CHART,
+  RANGE_OPTIONS,
+  getChartablePoints,
+  pickDefaultRange,
+  type RangeKey,
+  type ScrubbedReading,
+} from "./HistoryChart";
+import { MonitorStatusBadge } from "./MonitorStatusBadge";
 
 interface MonitorDetailProps {
   monitorId: string;
@@ -77,6 +83,10 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
   const [isChecking, setIsChecking] = useState(false);
   const isCheckingInFlight = useIsChecking(monitorId);
   const isCheckingActive = isChecking || isCheckingInFlight;
+  const isNewMonitorLoading = Boolean(
+    monitor && monitor.lastValue === null && monitor.lastStatus !== "error",
+  );
+  const checkStageText = useCheckStage(isCheckingActive || isNewMonitorLoading);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -84,15 +94,44 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isAlertOpen, setIsAlertOpen] = useState(false);
+  // The exact chart reading under the pointer while scrubbing, if any.
+  // The value card shows this live and falls back to the latest
+  // reading the moment the pointer leaves the chart.
+  const [scrub, setScrub] = useState<ScrubbedReading | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const alertRef = useRef<HTMLDivElement>(null);
   const renameTriggerRef = useRef<HTMLButtonElement>(null);
   const deleteTriggerRef = useRef<HTMLButtonElement>(null);
 
+  // Liquid highlight state for alert-condition dropdown
+  const alertMenuRef = useRef<HTMLDivElement>(null);
+  const [alertHighlight, setAlertHighlight] = useState<{ top: number; height: number; opacity: number } | null>(null);
+  const handleAlertItemEnter = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
+    const container = alertMenuRef.current;
+    if (!container) return;
+    const cRect = container.getBoundingClientRect();
+    const iRect = e.currentTarget.getBoundingClientRect();
+    setAlertHighlight({ top: iRect.top - cRect.top, height: iRect.height, opacity: 1 });
+  }, []);
+
+  // Liquid highlight state for more-actions menu
+  const actionsMenuRef = useRef<HTMLDivElement>(null);
+  const [actionsHighlight, setActionsHighlight] = useState<{ top: number; height: number; opacity: number; isDestructive: boolean } | null>(null);
+  const handleActionsItemEnter = useCallback((e: React.MouseEvent<HTMLButtonElement>, isDestructive = false) => {
+    const container = actionsMenuRef.current;
+    if (!container) return;
+    const cRect = container.getBoundingClientRect();
+    const iRect = e.currentTarget.getBoundingClientRect();
+    setActionsHighlight({ top: iRect.top - cRect.top, height: iRect.height, opacity: 1, isDestructive });
+  }, []);
+
   useEffect(() => {
     if (!isMenuOpen && !isAlertOpen) return;
 
-    const root = alertRef.current?.getRootNode() as Document | ShadowRoot | null;
+    const root = alertRef.current?.getRootNode() as
+      | Document
+      | ShadowRoot
+      | null;
 
     function handlePointerDown(e: Event) {
       const target = e.target as Node | null;
@@ -105,51 +144,26 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
     }
 
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
+      if (e.key === "Escape") {
         setIsMenuOpen(false);
         setIsAlertOpen(false);
       }
     }
 
     if (root && root !== document) {
-      root.addEventListener('pointerdown', handlePointerDown);
+      root.addEventListener("pointerdown", handlePointerDown);
     }
-    document.addEventListener('pointerdown', handlePointerDown);
-    window.addEventListener('keydown', handleKeyDown);
+    document.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
 
     return () => {
       if (root && root !== document) {
-        root.removeEventListener('pointerdown', handlePointerDown);
+        root.removeEventListener("pointerdown", handlePointerDown);
       }
-      document.removeEventListener('pointerdown', handlePointerDown);
-      window.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
     };
   }, [isMenuOpen, isAlertOpen]);
-
-  const changes = useMemo(() => {
-    const result = [];
-    for (let i = 0; i < history.length; i++) {
-      const entry = history[i];
-      if (entry.changed && entry.value !== null) {
-        const nextInHistory = history[i + 1];
-        const prevVal =
-          entry.previousValue !== undefined
-            ? entry.previousValue
-            : (nextInHistory?.value ?? null);
-        const prevSem =
-          entry.previousSemanticValue !== undefined
-            ? entry.previousSemanticValue
-            : (nextInHistory?.semanticValue ?? null);
-        const change = calculateValueChange(prevVal, prevSem, entry.value, entry.semanticValue);
-        result.push({
-          id: entry.id,
-          checkedAt: entry.checkedAt,
-          change,
-        });
-      }
-    }
-    return result;
-  }, [history]);
 
   const heroMovement = useMemo(() => {
     if (!monitor || !monitor.lastValue) return null;
@@ -161,7 +175,10 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
     if (history.length >= 2 && history[1]?.value !== null) {
       prevVal = history[1].value;
       prevSem = history[1].semanticValue ?? null;
-    } else if (history[0]?.previousValue !== undefined && history[0].previousValue !== null) {
+    } else if (
+      history[0]?.previousValue !== undefined &&
+      history[0].previousValue !== null
+    ) {
       prevVal = history[0].previousValue;
       prevSem = history[0].previousSemanticValue ?? null;
     }
@@ -187,12 +204,98 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
     );
   }, [history, monitor?.lastValue, monitor?.lastSemanticValue, monitor?.stats]);
 
+  // Presentation-only split of a trailing decimal fraction (e.g.
+  // "$58,834" + ".75") so the value card can render the fraction in
+  // a muted tone like the reference. Pure string slicing of whatever
+  // is currently shown (the live scrubbed reading, or the latest) -
+  // the stored value, tooltip title, and all calculations are untouched.
+  const shownValue =
+    monitor?.lastValue != null ? scrub?.raw || monitor.lastValue : null;
+  const valueParts = useMemo(() => {
+    if (shownValue == null) return null;
+    const match = shownValue.match(/^(.*)(\.\d+)$/);
+    if (!match) return null;
+    return { head: match[1], tail: match[2] };
+  }, [shownValue]);
+
+  const chartablePoints = useMemo(() => getChartablePoints(history), [history]);
+  const hasChart = chartablePoints.length >= MIN_POINTS_TO_CHART;
+
+  const [chartRange, setChartRange] = useState<RangeKey>(() =>
+    chartablePoints.length >= 2 ? pickDefaultRange(chartablePoints) : "24h",
+  );
+
+  // A new monitor (or a new selection) never inherits a stale scrubbed
+  // reading or range from the previously shown one.
+  useEffect(() => {
+    setScrub(null);
+    if (chartablePoints.length >= 2) {
+      setChartRange(pickDefaultRange(chartablePoints));
+    }
+  }, [monitorId]);
+
+  const activeRangeOption = useMemo(
+    () => RANGE_OPTIONS.find((o) => o.key === chartRange) ?? RANGE_OPTIONS[0],
+    [chartRange],
+  );
+
+  const rangeMovement = useMemo(() => {
+    if (!hasChart || !monitor || !monitor.lastValue) return null;
+    const cutoff = Date.now() - activeRangeOption.ms;
+    const filteredPoints = chartablePoints.filter(
+      (entry) => entry.checkedAt >= cutoff,
+    );
+    if (filteredPoints.length < 2) return null;
+
+    const baseline = filteredPoints[0];
+    const targetPoint = scrub
+      ? (filteredPoints.find((p) => p.checkedAt === scrub.checkedAt) ??
+        filteredPoints[filteredPoints.length - 1])
+      : filteredPoints[filteredPoints.length - 1];
+
+    if (targetPoint.value == null) return null;
+
+    const change = calculateValueChange(
+      baseline.value,
+      baseline.semanticValue,
+      targetPoint.value,
+      targetPoint.semanticValue,
+    );
+
+    if (!change.isNumeric || !change.formattedDelta) {
+      return { text: change.summaryText, direction: "same" as const };
+    }
+
+    const sign =
+      change.direction === "increase"
+        ? "+"
+        : change.direction === "decrease"
+          ? "-"
+          : "";
+    const absDelta = change.formattedDelta.replace(/^[+-]/, "");
+    const pct =
+      change.percentageDelta != null
+        ? `${Math.abs(change.percentageDelta).toFixed(1)}%`
+        : null;
+    const cleanPct = pct?.replace("0.0%", "0.0%");
+    const text = cleanPct
+      ? `${sign}${absDelta} · ${cleanPct}`
+      : `${sign}${absDelta}`;
+
+    return {
+      text,
+      direction: change.direction,
+    };
+  }, [hasChart, monitor?.lastValue, activeRangeOption, chartablePoints, scrub]);
+
   useEffect(() => {
     if (!monitor) return;
     let cancelled = false;
     async function refreshAccess() {
       try {
-        const granted = await sendMessage('checkOriginPermissions', [monitor!.url]);
+        const granted = await sendMessage("checkOriginPermissions", [
+          monitor!.url,
+        ]);
         if (!cancelled) setHasPermission(granted[monitor!.url] ?? null);
       } catch {
         if (!cancelled) setHasPermission(null);
@@ -205,33 +308,35 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
     function handleFocus() {
       void refreshAccess();
     }
-    window.addEventListener('focus', handleFocus);
+    window.addEventListener("focus", handleFocus);
     return () => {
       cancelled = true;
-      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener("focus", handleFocus);
     };
   }, [monitor?.url]);
 
   const [conditionType, setConditionType] = useState<AlertConditionType>(
-    monitor?.alertCondition?.type ?? 'any',
+    monitor?.alertCondition?.type ?? "any",
   );
   const [targetValueStr, setTargetValueStr] = useState<string>(
-    monitor?.alertCondition?.targetValue !== null && monitor?.alertCondition?.targetValue !== undefined
+    monitor?.alertCondition?.targetValue !== null &&
+      monitor?.alertCondition?.targetValue !== undefined
       ? String(monitor.alertCondition.targetValue)
-      : '',
+      : "",
   );
   const [targetTextStr, setTargetTextStr] = useState<string>(
-    monitor?.alertCondition?.targetText ?? '',
+    monitor?.alertCondition?.targetText ?? "",
   );
 
   useEffect(() => {
     if (monitor) {
-      const type = monitor.alertCondition?.type ?? 'any';
+      const type = monitor.alertCondition?.type ?? "any";
       const val =
-        monitor.alertCondition?.targetValue !== null && monitor.alertCondition?.targetValue !== undefined
+        monitor.alertCondition?.targetValue !== null &&
+        monitor.alertCondition?.targetValue !== undefined
           ? String(monitor.alertCondition.targetValue)
-          : '';
-      const txt = monitor.alertCondition?.targetText ?? '';
+          : "";
+      const txt = monitor.alertCondition?.targetText ?? "";
       setConditionType((prev) => (prev !== type ? type : prev));
       setTargetValueStr((prev) => (prev !== val ? val : prev));
       setTargetTextStr((prev) => (prev !== txt ? txt : prev));
@@ -244,8 +349,8 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
 
   const activeAlertCondition: AlertCondition = useMemo(() => {
     let numericTarget: number | null = null;
-    if (conditionType === 'below' || conditionType === 'above') {
-      const cleaned = targetValueStr.replace(/[^0-9.-]/g, '');
+    if (conditionType === "below" || conditionType === "above") {
+      const cleaned = targetValueStr.replace(/[^0-9.-]/g, "");
       if (cleaned && !Number.isNaN(parseFloat(cleaned))) {
         numericTarget = parseFloat(cleaned);
       } else if (monitor?.alertCondition?.targetValue != null) {
@@ -257,9 +362,15 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
     return {
       type: conditionType,
       targetValue: numericTarget,
-      targetText: conditionType === 'matches' ? targetTextStr : null,
+      targetText: conditionType === "matches" ? targetTextStr : null,
     };
-  }, [conditionType, targetValueStr, targetTextStr, monitor?.alertCondition?.targetValue, monitor?.lastSemanticValue?.normalized]);
+  }, [
+    conditionType,
+    targetValueStr,
+    targetTextStr,
+    monitor?.alertCondition?.targetValue,
+    monitor?.lastSemanticValue?.normalized,
+  ]);
 
   async function saveCondition(
     type: AlertConditionType,
@@ -268,8 +379,8 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
   ): Promise<boolean> {
     if (!monitor) return false;
     let numericTarget: number | null = null;
-    if (type === 'below' || type === 'above') {
-      const cleaned = valStr.replace(/[^0-9.-]/g, '');
+    if (type === "below" || type === "above") {
+      const cleaned = valStr.replace(/[^0-9.-]/g, "");
       if (cleaned && !Number.isNaN(parseFloat(cleaned))) {
         numericTarget = parseFloat(cleaned);
       } else if (monitor.alertCondition?.targetValue != null) {
@@ -281,16 +392,18 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
     const alertCondition: AlertCondition = {
       type,
       targetValue: numericTarget,
-      targetText: type === 'matches' ? txtStr : null,
+      targetText: type === "matches" ? txtStr : null,
     };
     const result = await updateMonitor(monitor.id, { alertCondition });
     if (!result.ok) {
       setActionError(result.error.toDisplayMessage());
       // Revert the optimistic condition UI to the last persisted values.
       const stored = monitor.alertCondition;
-      setConditionType(stored?.type ?? 'any');
-      setTargetValueStr(stored?.targetValue != null ? String(stored.targetValue) : '');
-      setTargetTextStr(stored?.targetText ?? '');
+      setConditionType(stored?.type ?? "any");
+      setTargetValueStr(
+        stored?.targetValue != null ? String(stored.targetValue) : "",
+      );
+      setTargetTextStr(stored?.targetText ?? "");
       return false;
     }
     return true;
@@ -299,7 +412,11 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
   function handleConditionTypeChange(nextType: AlertConditionType) {
     setConditionType(nextType);
     let nextVal = targetValueStr;
-    if ((nextType === 'below' || nextType === 'above') && !targetValueStr && monitor?.lastSemanticValue?.normalized != null) {
+    if (
+      (nextType === "below" || nextType === "above") &&
+      !targetValueStr &&
+      monitor?.lastSemanticValue?.normalized != null
+    ) {
       nextVal = String(monitor.lastSemanticValue.normalized);
       setTargetValueStr(nextVal);
     }
@@ -316,14 +433,14 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
   }
 
   function commitTargetValue() {
-    const cleaned = targetValueStr.replace(/[^0-9.-]/g, '');
+    const cleaned = targetValueStr.replace(/[^0-9.-]/g, "");
     if (!cleaned || Number.isNaN(parseFloat(cleaned))) {
       const fallback =
         monitor?.alertCondition?.targetValue != null
           ? String(monitor.alertCondition.targetValue)
           : monitor?.lastSemanticValue?.normalized != null
             ? String(monitor.lastSemanticValue.normalized)
-            : '';
+            : "";
       setTargetValueStr(fallback);
       if (fallback) {
         void saveCondition(conditionType, fallback, targetTextStr);
@@ -338,7 +455,7 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
   }
 
   function handleTargetKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === 'Enter') {
+    if (e.key === "Enter") {
       (e.target as HTMLInputElement).blur();
     }
   }
@@ -347,7 +464,9 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
 
   if (!monitor) {
     return (
-      <p className="py-10 text-center text-[13px] text-muted-foreground">This monitor no longer exists.</p>
+      <p className="py-10 text-center text-[13px] text-muted-foreground">
+        This monitor no longer exists.
+      </p>
     );
   }
 
@@ -385,7 +504,9 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
     setIsTogglingEnabled(true);
     setActionError(null);
     try {
-      const result = await updateMonitor(monitor.id, { enabled: !monitor.enabled });
+      const result = await updateMonitor(monitor.id, {
+        enabled: !monitor.enabled,
+      });
       if (!result.ok) {
         setActionError(result.error.toDisplayMessage());
       }
@@ -410,18 +531,20 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
     // keep raw url
   }
 
-  const isError = monitor.lastStatus === 'error';
-  const isTemporarilyBlocked = isError && isTemporaryPageState(monitor.lastDiagnosticCode);
-  const failureInfo = isError ? getFailureStateInfo(monitor.lastDiagnosticCode, monitor.lastError) : null;
+  const isError = monitor.lastStatus === "error";
+  const isTemporarilyBlocked =
+    isError && isTemporaryPageState(monitor.lastDiagnosticCode);
+  const failureInfo = isError
+    ? getFailureStateInfo(monitor.lastDiagnosticCode, monitor.lastError)
+    : null;
   const hasValue = monitor.lastValue !== null;
   const hasSemantic = monitor.lastSemanticValue !== null;
-  const isNumeric =
-    hasSemantic
-      ? monitor.lastSemanticValue!.type !== 'text' &&
-        monitor.lastSemanticValue!.normalized !== null &&
-        monitor.lastSemanticValue!.normalized !== undefined
-      : false;
-  const isCurrency = monitor.lastSemanticValue?.type === 'currency';
+  const isNumeric = hasSemantic
+    ? monitor.lastSemanticValue!.type !== "text" &&
+      monitor.lastSemanticValue!.normalized !== null &&
+      monitor.lastSemanticValue!.normalized !== undefined
+    : false;
+  const isCurrency = monitor.lastSemanticValue?.type === "currency";
   let unitPrefix: string | null = null;
   if (isCurrency && monitor.lastSemanticValue?.unit) {
     const rawUnit = monitor.lastSemanticValue.unit;
@@ -434,141 +557,267 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
     if (!unitPrefix) unitPrefix = rawUnit;
   }
   const prefixPaddingClass = !unitPrefix
-    ? ''
+    ? ""
     : unitPrefix.length === 1
-      ? 'pl-6'
+      ? "pl-6"
       : unitPrefix.length === 2
-        ? 'pl-8'
-        : 'pl-11';
-  const unitSuffix = monitor.lastSemanticValue?.type === 'percentage' ? '%' : null;
+        ? "pl-8"
+        : "pl-11";
+  const unitSuffix =
+    monitor.lastSemanticValue?.type === "percentage" ? "%" : null;
   const targetPlaceholder =
     monitor.lastSemanticValue?.normalized != null
       ? String(monitor.lastSemanticValue.normalized)
-      : 'Target';
+      : "Target";
+  const baseValue = monitor?.lastValue ?? shownValue;
+  const valueLength = baseValue
+    ? baseValue.length
+    : isError
+      ? (failureInfo?.label?.length ?? 12)
+      : 1;
+  const valueFontSizeClass =
+    valueLength > 13
+      ? "text-[18px]"
+      : valueLength > 10
+        ? "text-[20px]"
+        : valueLength > 7
+          ? "text-[23px]"
+          : valueLength > 5
+            ? "text-[27px]"
+            : "text-[32px]";
 
   return (
-    <div className="animate-enter-up flex flex-col gap-4">
+    <div className="animate-enter-up flex flex-col gap-3">
       {hasPermission === false && (
         <InlineNotice
           tone="warning"
           action={
-            <Button size="sm" variant="outline" onClick={() => sendMessage('openOptionsPage', undefined)}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => sendMessage("openOptionsPage", undefined)}
+            >
               Grant access
             </Button>
           }
         >
-          Access to <span className="text-foreground">{hostname}</span> was revoked. Checks are paused until
-          it's granted again.
+          Access to <span className="text-foreground">{hostname}</span> was
+          revoked. Checks are paused until it's granted again.
         </InlineNotice>
       )}
 
-      {/* Hero block - the current value, front and center, same role
-          here as the tile value on the list view. Everything else on
-          this screen is metadata about this one number. */}
-      <div className="rounded-lg border border-black/[0.05] bg-muted/50 p-3.5">
-        <div className="flex items-start justify-between gap-3">
-          <a
-            href={monitor.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex min-w-0 items-center gap-1.5 rounded-sm text-[11.5px] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-          >
-            <Favicon url={monitor.url} size={12} />
-            <span className="truncate">{hostname}</span>
-            <ExternalLink className="h-3 w-3 shrink-0" />
-          </a>
-          {!monitor.enabled ? (
-            <Badge variant="outline" className="gap-1 text-muted-foreground">
-              <Pause className="h-2.5 w-2.5" />
-              Paused
-            </Badge>
-          ) : (
-            <MonitorStatusBadge
-              status={isCheckingActive ? 'checking' : monitor.lastStatus}
-              diagnosticCode={monitor.lastDiagnosticCode}
-              lastError={monitor.lastError}
-            />
-          )}
-        </div>
-
-        <div className="mt-2.5 flex items-center gap-2">
-          <p
-            title={hasValue ? (monitor.lastValue ?? undefined) : undefined}
-            className={cn(
-              'truncate text-[28px] font-semibold leading-[1.1] tracking-[-0.015em] tabular-nums text-foreground',
-              !hasValue && 'text-muted-foreground/50',
-            )}
-          >
-            {hasValue ? monitor.lastValue : isError ? (failureInfo?.label ?? 'Check failed') : '—'}
-          </p>
-
-          {benchmarks?.dealStatusLabel && hasValue && (
-            <span
+      {/* Value card - the current reading, its movement, and the trend,
+          presented as one unit: large value, change underneath, the
+          history line integrated below rather than as a separate
+          analytics block. */}
+      {/* 1. Primary: current value + status + change + chart + 24H / 7D / 30D */}
+      <div className="rounded-lg border border-black/[0.05] dark:border-white/[0.08] bg-muted/40 p-3.5">
+        <div className="flex h-9 items-center justify-between gap-2.5">
+          <div className="flex h-9 min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+            <div
+              data-testid="monitor-value"
+              title={shownValue ?? undefined}
               className={cn(
-                'inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[11px] font-medium leading-none',
-                benchmarks.dealStatus === 'all-time-low'
-                  ? 'bg-emerald-500/15 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400'
-                  : 'bg-muted text-muted-foreground',
+                "inline-flex h-9 items-center whitespace-nowrap font-semibold leading-[1.1] tracking-[-0.02em] tabular-nums text-foreground",
+                valueFontSizeClass,
+                !shownValue && "text-muted-foreground/50",
               )}
             >
-              {benchmarks.dealStatus === 'near-lowest' ? 'Near low' : benchmarks.dealStatusLabel}
-            </span>
-          )}
+              {shownValue ? (
+                <SpinningCounter
+                  key={monitor.id}
+                  value={shownValue}
+                  head={valueParts?.head}
+                  tail={valueParts?.tail}
+                  disabled={Boolean(scrub)}
+                  lastCheckedAt={monitor.lastCheckedAt}
+                />
+              ) : isError ? (
+                (failureInfo?.label ?? "Check failed")
+              ) : !hasValue && !isError ? (
+                <div className="flex items-center gap-2 h-8" aria-label="Loading initial value">
+                  <div className="h-7 w-24 rounded bg-muted-foreground/20 animate-pulse" />
+                  <Loader2 className="h-4 w-4 animate-spin shrink-0 text-muted-foreground/60" />
+                </div>
+              ) : (
+                "—"
+              )}
+            </div>
+            {isCheckingActive && shownValue && (
+              <Loader2 className="h-4 w-4 animate-spin shrink-0 text-muted-foreground/60" />
+            )}
+          </div>
+
+          <div className="shrink-0">
+            {!monitor.enabled ? (
+              <Badge variant="outline" className="gap-1 text-muted-foreground">
+                <Pause className="h-2.5 w-2.5" />
+                Paused
+              </Badge>
+            ) : (
+              <MonitorStatusBadge
+                status={isCheckingActive || isNewMonitorLoading ? "checking" : monitor.lastStatus}
+                diagnosticCode={monitor.lastDiagnosticCode}
+                lastError={monitor.lastError}
+                stageText={checkStageText}
+              />
+            )}
+          </div>
         </div>
 
-        {heroMovement && (() => {
-          const suffix = ' since last check';
-          const hasSuffix = heroMovement.text.endsWith(suffix);
-          const rawMovement = hasSuffix
-            ? heroMovement.text.slice(0, -suffix.length)
-            : heroMovement.text;
-          const cleanMovement = rawMovement.replace(/([+-])0\.0%/g, '0.0%');
-
-          return (
-            <p className="mt-1 truncate text-[12px] font-medium tabular-nums">
+        {isNewMonitorLoading ? (
+          <p className="mt-1 flex items-center gap-1.5 truncate text-[12px] font-medium tabular-nums text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin shrink-0 text-muted-foreground/70" />
+            <span>{checkStageText}</span>
+          </p>
+        ) : hasChart ? (
+          <p className="mt-1 truncate text-[12px] font-medium tabular-nums">
+            {rangeMovement ? (
               <span
+                data-testid="monitor-movement"
                 className={cn(
-                  heroMovement.direction === 'increase'
-                    ? 'text-emerald-600 dark:text-emerald-400'
-                    : 'text-red-700 dark:text-red-400',
+                  rangeMovement.direction === "increase"
+                    ? "text-emerald-600 dark:text-emerald-400"
+                    : rangeMovement.direction === "decrease"
+                      ? "text-red-700 dark:text-red-400"
+                      : "text-muted-foreground",
                 )}
               >
-                {cleanMovement}
+                {rangeMovement.text}
               </span>
-              {hasSuffix && (
-                <span className="text-muted-foreground font-normal">
-                  {suffix}
-                </span>
-              )}
-            </p>
-          );
-        })()}
+            ) : (
+              <span
+                data-testid="monitor-movement"
+                className="text-muted-foreground"
+              >
+                No change
+              </span>
+            )}
+            {scrub ? (
+              <span
+                data-testid="monitor-reading-time"
+                title={formatDateTime(scrub.checkedAt)}
+                className="text-muted-foreground font-normal"
+              >
+                {" · "}
+                {formatDateTime(scrub.checkedAt)}
+              </span>
+            ) : (
+              <span
+                data-testid="monitor-reading-time"
+                className="text-muted-foreground font-normal"
+              >
+                {" "}
+                {activeRangeOption.description}
+              </span>
+            )}
+          </p>
+        ) : (
+          heroMovement &&
+          (() => {
+            const suffix = " since last check";
+            const hasSuffix = heroMovement.text.endsWith(suffix);
+            const rawMovement = hasSuffix
+              ? heroMovement.text.slice(0, -suffix.length)
+              : heroMovement.text;
+            const cleanMovement = rawMovement.replace(/([+-])0\.0%/g, "0.0%");
 
-        <div className="mt-2 flex items-center justify-between gap-2">
-          {monitor.lastSemanticValue ? (
-            <SemanticValueBadge type={monitor.lastSemanticValue.type} />
-          ) : (
-            <span />
-          )}
-          <span className="text-[11px] text-muted-foreground">
-            {monitor.lastCheckedAt ? `Updated ${formatRelativeTime(monitor.lastCheckedAt)}` : 'Not checked yet'}
-          </span>
+            return (
+              <p className="mt-1 truncate text-[12px] font-medium tabular-nums">
+                <span
+                  className={cn(
+                    heroMovement.direction === "increase"
+                      ? "text-emerald-600 dark:text-emerald-400"
+                      : "text-red-700 dark:text-red-400",
+                  )}
+                >
+                  {cleanMovement}
+                </span>
+                {hasSuffix && (
+                  <span className="text-muted-foreground font-normal">
+                    {suffix}
+                  </span>
+                )}
+                {scrub ? (
+                  <span
+                    data-testid="monitor-reading-time"
+                    title={formatDateTime(scrub.checkedAt)}
+                    className="text-muted-foreground font-normal"
+                  >
+                    {" · "}
+                    {formatDateTime(scrub.checkedAt)}
+                  </span>
+                ) : (
+                  monitor.lastCheckedAt && (
+                    <span
+                      data-testid="monitor-reading-time"
+                      className="text-muted-foreground/70 font-normal"
+                    >
+                      {" · "}
+                      {formatRelativeTime(monitor.lastCheckedAt)}
+                    </span>
+                  )
+                )}
+              </p>
+            );
+          })()
+        )}
+
+        {/* No movement line (flat series, text value) yet scrubbing a
+            charted series still needs its live timestamp beside the
+            value - the change line above covers every other case. */}
+        {!hasChart && !heroMovement && scrub && (
+          <p
+            data-testid="monitor-reading-time"
+            title={formatDateTime(scrub.checkedAt)}
+            className="mt-1 truncate text-[12px] tabular-nums text-muted-foreground"
+          >
+            {formatDateTime(scrub.checkedAt)}
+          </p>
+        )}
+        {!hasChart && !heroMovement && !scrub && isCheckingActive && (
+          <p className="mt-1 flex items-center gap-1.5 truncate text-[12px] font-medium tabular-nums text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin shrink-0 text-muted-foreground/70" />
+            <span>{checkStageText}</span>
+          </p>
+        )}
+
+        <div className="mt-4">
+          <HistoryChart
+            history={history}
+            onScrub={setScrub}
+            range={chartRange}
+            onRangeChange={setChartRange}
+          />
         </div>
       </div>
 
       {checkError && <InlineNotice tone="error">{checkError}</InlineNotice>}
       {actionError && <InlineNotice tone="error">{actionError}</InlineNotice>}
 
-      <div className="flex w-full items-center gap-2">
+      <div className="flex w-full items-center gap-2 px-6">
         {monitor.enabled ? (
-          <Button size="sm" className="h-7 shrink-0 text-xs" onClick={handleCheckNow} disabled={isCheckingActive}>
-            {isCheckingActive ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-            {isCheckingActive ? 'Checking…' : isError ? 'Retry check' : 'Check now'}
+          <Button
+            size="sm"
+            className="h-8 shrink-0 px-3 text-xs font-medium shadow-xs"
+            onClick={handleCheckNow}
+            disabled={isCheckingActive}
+          >
+            {isCheckingActive ? (
+              <span className="inline-flex items-center gap-1.5">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {checkStageText ?? "Checking…"}
+              </span>
+            ) : isError ? (
+              "Retry check"
+            ) : (
+              "Check now"
+            )}
           </Button>
         ) : (
           <Button
             size="sm"
-            className="h-7 shrink-0 text-xs"
+            className="h-8 shrink-0 px-3 text-xs font-medium shadow-xs"
             onClick={handleToggleEnabled}
             disabled={isTogglingEnabled}
           >
@@ -581,14 +830,18 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
           </Button>
         )}
 
-        <div ref={alertRef} onPointerDown={(e) => e.stopPropagation()} className="relative flex-1 min-w-0">
+        <div
+          ref={alertRef}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="relative flex-1 min-w-0"
+        >
           <Button
             type="button"
             size="sm"
-            variant="outline"
+            variant="ghost"
             className={cn(
-              'h-7 w-full justify-between gap-1.5 px-2 text-xs font-normal text-foreground shadow-none',
-              isAlertOpen && 'bg-muted',
+              "h-8 w-full justify-between gap-1.5 border-0 bg-[#F1F1F2] px-2.5 text-xs font-normal text-muted-foreground shadow-none hover:bg-[#e8e8e9] hover:text-foreground dark:border dark:border-white/[0.06] dark:bg-muted dark:hover:bg-muted/80",
+              isAlertOpen && "bg-[#e8e8e9] text-foreground dark:bg-muted",
             )}
             onClick={() => {
               setIsAlertOpen((prev) => !prev);
@@ -597,10 +850,16 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
             aria-label="Alert condition"
             aria-haspopup="menu"
             aria-expanded={isAlertOpen}
-            title={formatAlertConditionDescription(activeAlertCondition, monitor.lastSemanticValue)}
+            title={formatAlertConditionDescription(
+              activeAlertCondition,
+              monitor.lastSemanticValue,
+            )}
           >
             <span className="truncate tabular-nums text-left">
-              {formatAlertConditionDescription(activeAlertCondition, monitor.lastSemanticValue)}
+              {formatAlertConditionDescription(
+                activeAlertCondition,
+                monitor.lastSemanticValue,
+              )}
             </span>
             <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
           </Button>
@@ -609,23 +868,46 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
             <div
               role="menu"
               aria-label="Alert condition options"
-              className="absolute top-full left-0 z-50 mt-1 w-full min-w-[180px] rounded-md border border-border bg-popover p-1 shadow-md animate-enter-up"
+              ref={alertMenuRef}
+              onMouseLeave={() => setAlertHighlight(h => h ? { ...h, opacity: 0 } : null)}
+              className="absolute bottom-full left-0 z-50 mb-1 w-full min-w-[180px] rounded-md border border-border bg-popover p-1 shadow-md animate-enter-down"
             >
-              <div className="space-y-0.5">
+              {alertHighlight && (
+                <span
+                  aria-hidden
+                  style={{
+                    position: "absolute",
+                    left: 4,
+                    right: 4,
+                    top: alertHighlight.top,
+                    height: alertHighlight.height,
+                    opacity: alertHighlight.opacity,
+                    borderRadius: 6,
+                    background: "hsl(var(--accent))",
+                    transition: "top 130ms cubic-bezier(0.4,0,0.2,1), height 130ms cubic-bezier(0.4,0,0.2,1), opacity 80ms ease",
+                    pointerEvents: "none",
+                    zIndex: 0,
+                  }}
+                />
+              )}
+              <div className="relative z-10 space-y-0.5">
                 <button
                   type="button"
                   role="menuitemradio"
-                  aria-checked={conditionType === 'any'}
-                  onClick={() => handleConditionTypeChange('any')}
+                  aria-checked={conditionType === "any"}
+                  onClick={() => handleConditionTypeChange("any")}
+                  onMouseEnter={handleAlertItemEnter}
                   className={cn(
-                    'flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs transition-colors',
-                    conditionType === 'any'
-                      ? 'bg-accent font-medium text-accent-foreground'
-                      : 'text-foreground hover:bg-accent hover:text-accent-foreground',
+                    "flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs",
+                    conditionType === "any"
+                      ? "bg-accent font-medium text-accent-foreground"
+                      : "text-foreground",
                   )}
                 >
                   <span>Any change</span>
-                  {conditionType === 'any' && <Check className="h-3 w-3 shrink-0 text-foreground" />}
+                  {conditionType === "any" && (
+                    <Check className="h-3 w-3 shrink-0 text-foreground" />
+                  )}
                 </button>
 
                 {(!hasSemantic || isNumeric) && (
@@ -633,65 +915,81 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
                     <button
                       type="button"
                       role="menuitemradio"
-                      aria-checked={conditionType === 'decrease'}
-                      onClick={() => handleConditionTypeChange('decrease')}
+                      aria-checked={conditionType === "decrease"}
+                      onClick={() => handleConditionTypeChange("decrease")}
+                      onMouseEnter={handleAlertItemEnter}
                       className={cn(
-                        'flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs transition-colors',
-                        conditionType === 'decrease'
-                          ? 'bg-accent font-medium text-accent-foreground'
-                          : 'text-foreground hover:bg-accent hover:text-accent-foreground',
+                        "flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs",
+                        conditionType === "decrease"
+                          ? "bg-accent font-medium text-accent-foreground"
+                          : "text-foreground",
                       )}
                     >
-                      <span>{isCurrency ? 'Price drops' : 'Value decreases'}</span>
-                      {conditionType === 'decrease' && <Check className="h-3 w-3 shrink-0 text-foreground" />}
+                      <span>
+                        {isCurrency ? "Price drops" : "Value decreases"}
+                      </span>
+                      {conditionType === "decrease" && (
+                        <Check className="h-3 w-3 shrink-0 text-foreground" />
+                      )}
                     </button>
 
                     <button
                       type="button"
                       role="menuitemradio"
-                      aria-checked={conditionType === 'increase'}
-                      onClick={() => handleConditionTypeChange('increase')}
+                      aria-checked={conditionType === "increase"}
+                      onClick={() => handleConditionTypeChange("increase")}
+                      onMouseEnter={handleAlertItemEnter}
                       className={cn(
-                        'flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs transition-colors',
-                        conditionType === 'increase'
-                          ? 'bg-accent font-medium text-accent-foreground'
-                          : 'text-foreground hover:bg-accent hover:text-accent-foreground',
+                        "flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs",
+                        conditionType === "increase"
+                          ? "bg-accent font-medium text-accent-foreground"
+                          : "text-foreground",
                       )}
                     >
-                      <span>{isCurrency ? 'Price rises' : 'Value increases'}</span>
-                      {conditionType === 'increase' && <Check className="h-3 w-3 shrink-0 text-foreground" />}
+                      <span>
+                        {isCurrency ? "Price rises" : "Value increases"}
+                      </span>
+                      {conditionType === "increase" && (
+                        <Check className="h-3 w-3 shrink-0 text-foreground" />
+                      )}
                     </button>
 
                     <button
                       type="button"
                       role="menuitemradio"
-                      aria-checked={conditionType === 'below'}
-                      onClick={() => handleConditionTypeChange('below')}
+                      aria-checked={conditionType === "below"}
+                      onClick={() => handleConditionTypeChange("below")}
+                      onMouseEnter={handleAlertItemEnter}
                       className={cn(
-                        'flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs transition-colors',
-                        conditionType === 'below'
-                          ? 'bg-accent font-medium text-accent-foreground'
-                          : 'text-foreground hover:bg-accent hover:text-accent-foreground',
+                        "flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs",
+                        conditionType === "below"
+                          ? "bg-accent font-medium text-accent-foreground"
+                          : "text-foreground",
                       )}
                     >
                       <span>Drops below target</span>
-                      {conditionType === 'below' && <Check className="h-3 w-3 shrink-0 text-foreground" />}
+                      {conditionType === "below" && (
+                        <Check className="h-3 w-3 shrink-0 text-foreground" />
+                      )}
                     </button>
 
                     <button
                       type="button"
                       role="menuitemradio"
-                      aria-checked={conditionType === 'above'}
-                      onClick={() => handleConditionTypeChange('above')}
+                      aria-checked={conditionType === "above"}
+                      onClick={() => handleConditionTypeChange("above")}
+                      onMouseEnter={handleAlertItemEnter}
                       className={cn(
-                        'flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs transition-colors',
-                        conditionType === 'above'
-                          ? 'bg-accent font-medium text-accent-foreground'
-                          : 'text-foreground hover:bg-accent hover:text-accent-foreground',
+                        "flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs",
+                        conditionType === "above"
+                          ? "bg-accent font-medium text-accent-foreground"
+                          : "text-foreground",
                       )}
                     >
                       <span>Rises above target</span>
-                      {conditionType === 'above' && <Check className="h-3 w-3 shrink-0 text-foreground" />}
+                      {conditionType === "above" && (
+                        <Check className="h-3 w-3 shrink-0 text-foreground" />
+                      )}
                     </button>
                   </>
                 )}
@@ -700,17 +998,20 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
                   <button
                     type="button"
                     role="menuitemradio"
-                    aria-checked={conditionType === 'matches'}
-                    onClick={() => handleConditionTypeChange('matches')}
+                    aria-checked={conditionType === "matches"}
+                    onClick={() => handleConditionTypeChange("matches")}
+                    onMouseEnter={handleAlertItemEnter}
                     className={cn(
-                      'flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs transition-colors',
-                      conditionType === 'matches'
-                        ? 'bg-accent font-medium text-accent-foreground'
-                        : 'text-foreground hover:bg-accent hover:text-accent-foreground',
+                      "flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs",
+                      conditionType === "matches"
+                        ? "bg-accent font-medium text-accent-foreground"
+                        : "text-foreground",
                     )}
                   >
                     <span>Text matches</span>
-                    {conditionType === 'matches' && <Check className="h-3 w-3 shrink-0 text-foreground" />}
+                    {conditionType === "matches" && (
+                      <Check className="h-3 w-3 shrink-0 text-foreground" />
+                    )}
                   </button>
                 )}
               </div>
@@ -718,11 +1019,18 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
           )}
         </div>
 
-        <div ref={menuRef} onPointerDown={(e) => e.stopPropagation()} className="relative inline-flex shrink-0 items-center">
+        <div
+          ref={menuRef}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="relative inline-flex shrink-0 items-center"
+        >
           <Button
             size="sm"
-            variant="outline"
-            className={cn('h-7 w-7 p-0', isMenuOpen && 'bg-muted')}
+            variant="ghost"
+            className={cn(
+              "h-8 w-8 border-0 bg-[#F1F1F2] p-0 text-muted-foreground shadow-none hover:bg-[#e8e8e9] hover:text-foreground dark:border dark:border-white/[0.06] dark:bg-muted dark:hover:bg-muted/80",
+              isMenuOpen && "bg-[#e8e8e9] text-foreground dark:bg-muted",
+            )}
             onClick={() => {
               setIsMenuOpen((prev) => !prev);
               setIsAlertOpen(false);
@@ -731,7 +1039,7 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
             aria-haspopup="menu"
             aria-expanded={isMenuOpen}
           >
-            <MoreHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
+            <MoreHorizontal className="h-3.5 w-3.5" />
           </Button>
 
           {isMenuOpen && (
@@ -739,102 +1047,140 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
               role="menu"
               aria-orientation="vertical"
               aria-label="More actions"
-              className="absolute top-full right-0 z-50 mt-1 w-44 rounded-md border border-border bg-popover p-1 shadow-md animate-enter-up"
+              ref={actionsMenuRef}
+              onMouseLeave={() => setActionsHighlight(h => h ? { ...h, opacity: 0 } : null)}
+              className="absolute bottom-full right-0 z-50 mb-1 w-44 rounded-md border border-border bg-popover p-1 shadow-md animate-enter-down"
             >
-              <button
-                type="button"
-                role="menuitem"
-                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
-                onClick={() => {
-                  setIsMenuOpen(false);
-                  void handleToggleEnabled();
-                }}
-                disabled={isTogglingEnabled}
-              >
-                {monitor.enabled ? (
-                  <>
-                    <Pause className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                    <span>Pause monitoring</span>
-                  </>
-                ) : (
-                  <>
-                    <Play className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                    <span>Resume monitoring</span>
-                  </>
-                )}
-              </button>
+              {actionsHighlight && (
+                <span
+                  aria-hidden
+                  style={{
+                    position: "absolute",
+                    left: 4,
+                    right: 4,
+                    top: actionsHighlight.top,
+                    height: actionsHighlight.height,
+                    opacity: actionsHighlight.opacity,
+                    borderRadius: 6,
+                    background: actionsHighlight.isDestructive
+                      ? "hsl(var(--destructive) / 0.10)"
+                      : "hsl(var(--accent))",
+                    transition: "top 130ms cubic-bezier(0.4,0,0.2,1), height 130ms cubic-bezier(0.4,0,0.2,1), opacity 80ms ease, background 100ms ease",
+                    pointerEvents: "none",
+                    zIndex: 0,
+                  }}
+                />
+              )}
+              <div className="relative z-10">
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-foreground disabled:pointer-events-none disabled:opacity-50"
+                  onClick={() => {
+                    setIsMenuOpen(false);
+                    void handleToggleEnabled();
+                  }}
+                  onMouseEnter={(e) => handleActionsItemEnter(e, false)}
+                  disabled={isTogglingEnabled}
+                >
+                  {monitor.enabled ? (
+                    <>
+                      <Pause className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span>Pause monitoring</span>
+                    </>
+                  ) : (
+                    <>
+                      <Play className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span>Resume monitoring</span>
+                    </>
+                  )}
+                </button>
 
-              <button
-                type="button"
-                role="menuitem"
-                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-                onClick={() => {
-                  setIsMenuOpen(false);
-                  renameTriggerRef.current?.click();
-                }}
-              >
-                <Pencil className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                <span>Rename</span>
-              </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-foreground"
+                  onClick={() => {
+                    setIsMenuOpen(false);
+                    renameTriggerRef.current?.click();
+                  }}
+                  onMouseEnter={(e) => handleActionsItemEnter(e, false)}
+                >
+                  <Pencil className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>Rename</span>
+                </button>
 
-              <div className="my-1 border-t border-border/50" role="separator" />
+                <div
+                  className="my-1 border-t border-border/50"
+                  role="separator"
+                />
 
-              <button
-                type="button"
-                role="menuitem"
-                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-destructive transition-colors hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none disabled:opacity-50"
-                onClick={() => {
-                  setIsMenuOpen(false);
-                  deleteTriggerRef.current?.click();
-                }}
-                disabled={isDeleting}
-              >
-                <Trash2 className="h-3.5 w-3.5 shrink-0 text-destructive" />
-                <span>Delete</span>
-              </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-destructive disabled:pointer-events-none disabled:opacity-50"
+                  onClick={() => {
+                    setIsMenuOpen(false);
+                    deleteTriggerRef.current?.click();
+                  }}
+                  onMouseEnter={(e) => handleActionsItemEnter(e, true)}
+                  disabled={isDeleting}
+                >
+                  <Trash2 className="h-3.5 w-3.5 shrink-0 text-destructive" />
+                  <span>Delete</span>
+                </button>
+              </div>
             </div>
           )}
         </div>
       </div>
 
-      {(conditionType === 'below' || conditionType === 'above') && (
-        <div className="relative w-full">
-          {unitPrefix && (
-            <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
-              {unitPrefix}
-            </span>
-          )}
-          <Input
-            type="text"
-            inputMode="decimal"
-            className={cn('h-8 text-xs', prefixPaddingClass, unitSuffix && 'pr-6')}
-            placeholder={targetPlaceholder}
-            value={targetValueStr}
-            onChange={handleTargetValueChange}
-            onBlur={commitTargetValue}
-            onKeyDown={handleTargetKeyDown}
-            autoFocus
-          />
-          {unitSuffix && (
-            <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
-              {unitSuffix}
-            </span>
-          )}
+      {(conditionType === "below" || conditionType === "above") && (
+        <div className="w-full px-6">
+          <div className="relative w-full">
+            {unitPrefix && (
+              <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
+                {unitPrefix}
+              </span>
+            )}
+            <Input
+              type="text"
+              inputMode="decimal"
+              className={cn(
+                "h-8 text-xs",
+                prefixPaddingClass,
+                unitSuffix && "pr-6",
+              )}
+              placeholder={targetPlaceholder}
+              value={targetValueStr}
+              onChange={handleTargetValueChange}
+              onBlur={commitTargetValue}
+              onKeyDown={handleTargetKeyDown}
+              autoFocus
+            />
+            {unitSuffix && (
+              <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
+                {unitSuffix}
+              </span>
+            )}
+          </div>
         </div>
       )}
 
-      {conditionType === 'matches' && (
-        <div className="relative w-full">
-          <Input
-            type="text"
-            className="h-8 text-xs"
-            placeholder="e.g. In Stock"
-            value={targetTextStr}
-            onChange={handleTargetTextChange}
-            onBlur={commitTargetText}
-            onKeyDown={handleTargetKeyDown}
-            autoFocus
-          />
+      {conditionType === "matches" && (
+        <div className="w-full px-6">
+          <div className="relative w-full">
+            <Input
+              type="text"
+              className="h-8 text-xs"
+              placeholder="e.g. In Stock"
+              value={targetTextStr}
+              onChange={handleTargetTextChange}
+              onBlur={commitTargetText}
+              onKeyDown={handleTargetKeyDown}
+              autoFocus
+            />
+          </div>
         </div>
       )}
 
@@ -867,188 +1213,113 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
         }
       />
 
-      <div className="grid grid-cols-2 gap-2">
-        <Stat
-          label="Last checked"
-          value={monitor.lastCheckedAt ? formatRelativeTime(monitor.lastCheckedAt) : 'Never'}
-          title={monitor.lastCheckedAt ? formatDateTime(monitor.lastCheckedAt) : undefined}
-        />
-        <Stat
-          label="Check every"
-          value={formatIntervalMinutes(monitor.intervalMinutes)}
-        >
-          {!monitor.enabled && (
-            <span className="text-[10px] text-muted-foreground">Paused</span>
-          )}
-        </Stat>
+      {/* 3. Monitor settings: Last checked + Checks every */}
+      <div className="rounded-lg border border-black/[0.04] bg-muted/30 px-6 py-2.5 dark:border-white/[0.05]">
+        <div className="grid grid-cols-2 gap-4">
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="text-[11px] font-medium text-muted-foreground">
+              Last checked
+            </span>
+            <span
+              title={
+                monitor.lastCheckedAt
+                  ? formatDateTime(monitor.lastCheckedAt)
+                  : undefined
+              }
+              className="truncate text-[12.5px] font-medium tabular-nums text-foreground"
+            >
+              {monitor.lastCheckedAt
+                ? formatRelativeTime(monitor.lastCheckedAt)
+                : "Never"}
+            </span>
+          </div>
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="text-[11px] font-medium text-muted-foreground">
+              Checks every
+            </span>
+            <div className="flex items-center gap-1.5">
+              <span className="truncate text-[12.5px] font-medium tabular-nums text-foreground">
+                {formatIntervalMinutes(monitor.intervalMinutes)}
+              </span>
+              {!monitor.enabled && (
+                <span className="text-[10px] text-muted-foreground font-normal">
+                  Paused
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
 
-
       {isError && (
-        <InlineNotice tone={isTemporarilyBlocked ? 'warning' : 'error'}>
+        <InlineNotice tone={isTemporarilyBlocked ? "warning" : "error"}>
           <div className="flex flex-col gap-1">
             <span className="font-medium">
               {failureInfo?.description ?? monitor.lastError}
             </span>
-            {monitor.lastError && monitor.lastError !== failureInfo?.description && (
-              <span className="text-[11.5px] text-muted-foreground">
-                {monitor.lastError}
-              </span>
-            )}
+            {monitor.lastError &&
+              monitor.lastError !== failureInfo?.description && (
+                <span className="text-[11.5px] text-muted-foreground">
+                  {monitor.lastError}
+                </span>
+              )}
             {isTemporarilyBlocked && (
               <span className="text-[11.5px] text-muted-foreground">
-                No value has been changed or recorded from this page — Monitor will keep checking on its normal
-                schedule and pick the real value back up automatically once the site stops showing it.
+                No value has been changed or recorded from this page — Monitor
+                will keep checking on its normal schedule and pick the real
+                value back up automatically once the site stops showing it.
               </span>
             )}
             {hasValue && (
               <span className="text-[11.5px] text-muted-foreground">
-                Last known value preserved: <span className="font-medium text-foreground">{monitor.lastValue}</span>
+                Last known value preserved:{" "}
+                <span className="font-medium text-foreground">
+                  {monitor.lastValue}
+                </span>
               </span>
             )}
           </div>
         </InlineNotice>
       )}
 
-      <div>
-        <div className="mb-2.5 flex items-center justify-between">
-          <h2 className="text-[13px] font-semibold tracking-tight">History</h2>
-          <span className="text-[11px] text-muted-foreground">
-            {history.length} check{history.length === 1 ? '' : 's'}
-          </span>
-        </div>
-        <Separator className="mb-3.5" />
-
-        {benchmarks && (
-          <div className="mb-3 grid grid-cols-3 gap-2">
-            <div className="flex min-w-0 flex-col gap-0.5 rounded-lg border border-black/[0.05] bg-muted/50 p-2.5">
-              <span className="text-[11px] text-muted-foreground">Low</span>
+      {/* 4. Statistics: All-time low + Average + All-time high */}
+      {benchmarks && (
+        <div className="rounded-lg border border-black/[0.04] bg-muted/30 px-6 py-2.5 dark:border-white/[0.05]">
+          <div className="grid grid-cols-3 gap-2">
+            <div className="flex min-w-0 flex-col items-start gap-0.5 text-left">
+              <span className="text-[11px] font-medium text-muted-foreground">
+                All-time low
+              </span>
               <span
-                title={benchmarks.lowDate ? `All-time low on ${formatDateTime(benchmarks.lowDate)}` : undefined}
+                title={
+                  benchmarks.lowDate
+                    ? `All-time low on ${formatDateTime(benchmarks.lowDate)}`
+                    : undefined
+                }
                 className="truncate text-[12.5px] font-medium tabular-nums text-foreground"
               >
                 {benchmarks.formattedLow}
               </span>
             </div>
 
-            <div className="flex min-w-0 flex-col gap-0.5 rounded-lg border border-black/[0.05] bg-muted/50 p-2.5">
-              <span className="text-[11px] text-muted-foreground">Average</span>
+            <div className="flex min-w-0 flex-col items-center gap-0.5 text-center">
+              <span className="text-[11px] font-medium text-muted-foreground">
+                Average
+              </span>
               <span className="truncate text-[12.5px] font-medium tabular-nums text-foreground">
                 {benchmarks.formattedAverage}
               </span>
             </div>
 
-            <div className="flex min-w-0 flex-col gap-0.5 rounded-lg border border-black/[0.05] bg-muted/50 p-2.5">
-              <span className="text-[11px] text-muted-foreground">High</span>
+            <div className="flex min-w-0 flex-col items-end gap-0.5 text-right">
+              <span className="text-[11px] font-medium text-muted-foreground">
+                All-time high
+              </span>
               <span className="truncate text-[12.5px] font-medium tabular-nums text-foreground">
                 {benchmarks.formattedHigh}
               </span>
             </div>
           </div>
-        )}
-
-        <HistoryChart history={history} />
-        {changes.length > 0 ? (
-          <div className="mt-4 flex flex-col gap-1.5">
-            <div className="flex items-center justify-between">
-              <span className="text-[11.5px] font-medium text-muted-foreground">Recent changes</span>
-              {changes.length > 3 && (
-                <Dialog>
-                  <DialogTrigger asChild>
-                    <button
-                      type="button"
-                      className="text-[11px] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none"
-                    >
-                      View all ({changes.length})
-                    </button>
-                  </DialogTrigger>
-                  <DialogContent className="max-w-[340px] p-4">
-                    <DialogHeader className="gap-0.5">
-                      <div className="flex items-center justify-between">
-                        <DialogTitle className="text-[13px] font-semibold">Change history</DialogTitle>
-                        <DialogClose asChild>
-                          <button
-                            type="button"
-                            className="rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none"
-                            aria-label="Close"
-                          >
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        </DialogClose>
-                      </div>
-                      <DialogDescription className="text-[11px] text-muted-foreground">
-                        {changes.length} recorded change{changes.length === 1 ? '' : 's'}
-                      </DialogDescription>
-                    </DialogHeader>
-                    <div className="mt-2.5 max-h-[300px] overflow-y-auto divide-y divide-border/30 pr-0.5">
-                      {changes.map((item) => (
-                        <ChangeRow key={item.id} {...item} />
-                      ))}
-                    </div>
-                  </DialogContent>
-                </Dialog>
-              )}
-            </div>
-
-            <div className="divide-y divide-border/30">
-              {changes.slice(0, 3).map((item) => (
-                <ChangeRow key={item.id} {...item} />
-              ))}
-            </div>
-          </div>
-        ) : hasValue && history.length > 1 ? (
-          <div className="mt-4 rounded-lg border border-dashed border-border/60 p-2.5 text-center text-[11px] text-muted-foreground">
-            No changes recorded yet — value has remained {monitor.lastValue} across {history.length} checks.
-          </div>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-interface ChangeRowProps {
-  checkedAt: number;
-  change: ValueChangeSummary;
-}
-
-function ChangeRow({ checkedAt, change }: ChangeRowProps) {
-  return (
-    <div className="flex items-center justify-between gap-2 py-2 px-0.5 text-[12px]">
-      <div className="flex min-w-0 flex-col gap-0.5">
-        <div className="flex items-center gap-1.5 font-medium tabular-nums text-foreground">
-          {change.previousValue ? (
-            <>
-              <span className="truncate text-muted-foreground">{change.previousValue}</span>
-              <span className="text-muted-foreground/50">→</span>
-              <span className="truncate">{change.currentValue}</span>
-            </>
-          ) : (
-            <span>{change.currentValue}</span>
-          )}
-        </div>
-        <span className="text-[10.5px] text-muted-foreground" title={formatDateTime(checkedAt)}>
-          {formatRelativeTime(checkedAt)}
-        </span>
-      </div>
-
-      {change.isNumeric && change.formattedDelta && (
-        <div className="flex shrink-0 items-center text-[11px] font-medium tabular-nums text-right">
-          <span
-            className={cn(
-              change.direction === 'increase'
-                ? 'text-emerald-600 dark:text-emerald-400'
-                : change.direction === 'decrease'
-                  ? 'text-red-700 dark:text-red-400'
-                  : 'text-muted-foreground',
-            )}
-          >
-            {change.formattedDelta}
-            {change.formattedPercentage && (
-              <span className="ml-1 text-muted-foreground">
-                ({change.formattedPercentage.replace(/^[+-]0\.0%$/, '0.0%')})
-              </span>
-            )}
-          </span>
         </div>
       )}
     </div>
@@ -1077,12 +1348,12 @@ function RenameMonitorDialog({
 
   return (
     <Dialog>
-      <DialogTrigger asChild>
-        {trigger}
-      </DialogTrigger>
+      <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent className="max-w-[320px] p-4">
         <DialogHeader className="gap-1">
-          <DialogTitle className="text-[13px] font-semibold">Rename monitor</DialogTitle>
+          <DialogTitle className="text-[13px] font-semibold">
+            Rename monitor
+          </DialogTitle>
           <DialogDescription className="text-[11px] text-muted-foreground">
             Enter a display name. Leave empty to use {defaultName}.
           </DialogDescription>
@@ -1094,7 +1365,7 @@ function RenameMonitorDialog({
             placeholder={defaultName}
             className="h-8 text-xs"
             onKeyDown={(e) => {
-              if (e.key === 'Enter') {
+              if (e.key === "Enter") {
                 e.preventDefault();
                 saveBtnRef.current?.click();
               }
@@ -1127,40 +1398,10 @@ function RenameMonitorDialog({
   );
 }
 
-function Stat({
-  label,
-  value,
-  title,
-  truncate,
-  children,
-}: {
-  label: string;
-  value: string;
-  title?: string;
-  truncate?: boolean;
-  children?: React.ReactNode;
-}) {
-  return (
-    <div className="flex min-w-0 flex-col gap-1 rounded-lg border border-black/[0.05] bg-muted/50 p-2.5">
-      <span className="text-[11px] text-muted-foreground">{label}</span>
-      <span
-        title={title}
-        className={cn(
-          'text-[13px] font-medium tabular-nums',
-          truncate && 'truncate',
-        )}
-      >
-        {value}
-      </span>
-      {children}
-    </div>
-  );
-}
-
 function DetailSkeleton() {
   return (
     <div className="flex flex-col gap-4">
-      <div className="rounded-lg border border-black/[0.05] bg-muted/50 p-3.5">
+      <div className="rounded-lg border border-black/[0.05] bg-muted/40 p-3.5 dark:border-white/[0.08]">
         <div className="flex items-center justify-between gap-4">
           <Skeleton className="h-3.5 w-28" />
           <Skeleton className="h-5 w-20 rounded-full" />

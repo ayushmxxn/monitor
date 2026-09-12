@@ -393,10 +393,14 @@ function findNumericCandidates(
     // analytics dashboards this shape is almost always a change
     // indicator annotating a nearby metric, not the metric itself. It
     // stays fully eligible on its own (single candidate) and keeps its
-    // relative order against other signed deltas - it only loses to an
-    // unsigned value it would otherwise tie or narrowly beat.
+    // relative order against other signed deltas - but it now loses
+    // outright to any unsigned numeric candidate, so a bare metric
+    // with no preceding label ("1,234 +5.2%") still resolves to the
+    // metric rather than the delta annotating it. A genuinely
+    // ambiguous pair (two unsigned values, two deltas) still ties and
+    // is still flagged ambiguous exactly as before.
     if (/^[+-]/.test(trimmed) && semantic.type === 'percentage') {
-      score -= 25;
+      score -= 35;
     }
 
     // Penalty for index, rank, time or secondary limiter context

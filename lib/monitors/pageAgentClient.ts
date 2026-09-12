@@ -1,10 +1,13 @@
-import type { ElementFingerprint } from './fingerprint';
-import type { PageAgentLocateResponse, PickResult } from '@/entrypoints/pageAgent.content';
-import { diagnostic, type Diagnostic } from './diagnostics';
-import type { SemanticValue } from './semanticValue';
-import { sleep } from './readiness';
+import type {
+  PageAgentLocateResponse,
+  PickResult,
+} from "@/entrypoints/pageAgent.content";
+import { diagnostic, type Diagnostic } from "./diagnostics";
+import type { ElementFingerprint } from "./fingerprint";
+import { sleep } from "./readiness";
+import type { SemanticValue } from "./semanticValue";
 
-const PAGE_AGENT_FILE = '/content-scripts/pageAgent.js';
+const PAGE_AGENT_FILE = "/content-scripts/pageAgent.js";
 
 /**
  * Ensures the page agent content script has been injected into `tabId`.
@@ -31,7 +34,8 @@ async function ensurePageAgentInjected(tabId: number): Promise<void> {
  * `mapInjectionError`'s patterns below, which are persistent
  * conditions retrying can't fix.
  */
-const TRANSIENT_FRAME_ERROR = /frame with id \d+ was removed|no frame with id \d+ in tab|frame with id \d+ is showing error page/i;
+const TRANSIENT_FRAME_ERROR =
+  /frame with id \d+ was removed|no frame with id \d+ in tab|frame with id \d+ is showing error page/i;
 
 export function isTransientFrameError(error: unknown): boolean {
   return TRANSIENT_FRAME_ERROR.test(describeError(error));
@@ -74,21 +78,35 @@ const SETTLE_MAX_ATTEMPTS = 3;
  * backstop for whatever slips past every attempt here (a bounce that
  * starts a beat later than any of our reads), not the main mechanism.
  */
-export async function verifyTabSettled(tabId: number): Promise<{ ok: true } | { ok: false; diagnostic: Diagnostic }> {
+export async function verifyTabSettled(
+  tabId: number,
+): Promise<{ ok: true } | { ok: false; diagnostic: Diagnostic }> {
   for (let attempt = 0; attempt < SETTLE_MAX_ATTEMPTS; attempt++) {
     const before = await getTabSnapshot(tabId);
     if (!before) {
-      return { ok: false, diagnostic: diagnostic('TAB_CLOSED', 'closed before it could be verified stable') };
+      return {
+        ok: false,
+        diagnostic: diagnostic(
+          "TAB_CLOSED",
+          "closed before it could be verified stable",
+        ),
+      };
     }
 
     await sleep(SETTLE_RECHECK_DELAY_MS);
 
     const after = await getTabSnapshot(tabId);
     if (!after) {
-      return { ok: false, diagnostic: diagnostic('TAB_CLOSED', 'closed before it could be verified stable') };
+      return {
+        ok: false,
+        diagnostic: diagnostic(
+          "TAB_CLOSED",
+          "closed before it could be verified stable",
+        ),
+      };
     }
 
-    if (after.status === 'complete' && after.url === before.url) {
+    if (after.status === "complete" && after.url === before.url) {
       return { ok: true };
     }
     // Still navigating, or bounced to a different URL between the two
@@ -124,7 +142,13 @@ async function runWithFrameRetry<T>(
       try {
         await browser.tabs.get(tabId);
       } catch {
-        return { ok: false, diagnostic: diagnostic('TAB_CLOSED', 'closed during a navigation retry') };
+        return {
+          ok: false,
+          diagnostic: diagnostic(
+            "TAB_CLOSED",
+            "closed during a navigation retry",
+          ),
+        };
       }
       await sleep(delay);
     }
@@ -146,7 +170,7 @@ export interface LiveLocateOutcome {
 export async function locateOnTab(
   tabId: number,
   fingerprint: ElementFingerprint,
-  extractMode: 'text' | 'attribute',
+  extractMode: "text" | "attribute",
   attributeName: string | null,
   maxTotalWaitMs: number,
 ): Promise<LiveLocateOutcome> {
@@ -160,25 +184,40 @@ export async function locateOnTab(
     await ensurePageAgentInjected(tabId);
     const [injection] = await browser.scripting.executeScript({
       target: { tabId },
-      func: (fpJson: string, mode: 'text' | 'attribute', attrName: string | null, waitMs: number) => {
+      func: (
+        fpJson: string,
+        mode: "text" | "attribute",
+        attrName: string | null,
+        waitMs: number,
+      ) => {
         const win = window as unknown as {
-          __monitorPageAgent?: { locate: (...args: unknown[]) => Promise<PageAgentLocateResponse> };
+          __monitorPageAgent?: {
+            locate: (...args: unknown[]) => Promise<PageAgentLocateResponse>;
+          };
         };
         if (!win.__monitorPageAgent) {
           return Promise.resolve<PageAgentLocateResponse>({
             value: null,
-            diagnosticCode: 'UNKNOWN',
-            diagnosticMessage: 'Monitoring agent was not available on this page.',
+            diagnosticCode: "UNKNOWN",
+            diagnosticMessage:
+              "Monitoring agent was not available on this page.",
             diagnosticDetail: null,
             updatedFingerprint: null,
             confidence: 0,
-            method: 'none',
+            method: "none",
             semanticValue: null,
           });
         }
-        return win.__monitorPageAgent.locate(fpJson, mode, attrName, { maxTotalWaitMs: waitMs });
+        return win.__monitorPageAgent.locate(fpJson, mode, attrName, {
+          maxTotalWaitMs: waitMs,
+        });
       },
-      args: [JSON.stringify(fingerprint), extractMode, attributeName, maxTotalWaitMs],
+      args: [
+        JSON.stringify(fingerprint),
+        extractMode,
+        attributeName,
+        maxTotalWaitMs,
+      ],
     });
     return injection;
   });
@@ -190,7 +229,7 @@ export async function locateOnTab(
       diagnostic: attemptResult.diagnostic,
       updatedFingerprint: null,
       confidence: 0,
-      method: 'none',
+      method: "none",
       semanticValue: null,
     };
   }
@@ -200,10 +239,10 @@ export async function locateOnTab(
     return {
       ok: false,
       value: null,
-      diagnostic: diagnostic('UNKNOWN', 'the page agent returned no result'),
+      diagnostic: diagnostic("UNKNOWN", "the page agent returned no result"),
       updatedFingerprint: null,
       confidence: 0,
-      method: 'none',
+      method: "none",
       semanticValue: null,
     };
   }
@@ -211,7 +250,10 @@ export async function locateOnTab(
   return {
     ok: result.value !== null,
     value: result.value,
-    diagnostic: diagnostic(result.diagnosticCode as Diagnostic['code'], result.diagnosticDetail ?? undefined),
+    diagnostic: diagnostic(
+      result.diagnosticCode as Diagnostic["code"],
+      result.diagnosticDetail ?? undefined,
+    ),
     updatedFingerprint: result.updatedFingerprint,
     confidence: result.confidence,
     method: result.method,
@@ -226,9 +268,15 @@ export async function pickOnTab(tabId: number): Promise<PickResult | null> {
     const [injection] = await browser.scripting.executeScript({
       target: { tabId },
       func: () => {
-        const win = window as unknown as { __monitorPageAgent?: { pick: () => Promise<PickResult> } };
+        const win = window as unknown as {
+          __monitorPageAgent?: { pick: () => Promise<PickResult> };
+        };
         if (!win.__monitorPageAgent) {
-          return Promise.resolve<PickResult>({ saved: false, monitorName: null });
+          return Promise.resolve<PickResult>({
+            saved: false,
+            monitorName: null,
+            monitorId: null,
+          });
         }
         return win.__monitorPageAgent.pick();
       },
@@ -250,13 +298,16 @@ function describeError(error: unknown): string {
 function mapInjectionError(error: unknown): Diagnostic {
   const message = describeError(error);
   if (/cannot access.*chrome:\/\/|cannot access a chrome/i.test(message)) {
-    return diagnostic('PERMISSION_DENIED', 'this is a restricted browser page the extension cannot script');
+    return diagnostic(
+      "PERMISSION_DENIED",
+      "this is a restricted browser page the extension cannot script",
+    );
   }
   if (/no tab with id|no tab matching|not found/i.test(message)) {
-    return diagnostic('TAB_CLOSED', message);
+    return diagnostic("TAB_CLOSED", message);
   }
   if (/permission/i.test(message)) {
-    return diagnostic('PERMISSION_DENIED', message);
+    return diagnostic("PERMISSION_DENIED", message);
   }
-  return diagnostic('UNKNOWN', message);
+  return diagnostic("UNKNOWN", message);
 }

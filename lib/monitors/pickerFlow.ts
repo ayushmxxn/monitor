@@ -36,7 +36,11 @@ export async function runPickerFlow(tabId: number): Promise<void> {
   try {
     await sendMessage(
       'elementPickerFinished',
-      { saved: result?.saved ?? false, monitorName: result?.monitorName ?? null },
+      {
+        saved: result?.saved ?? false,
+        monitorName: result?.monitorName ?? null,
+        monitorId: result?.monitorId ?? null,
+      },
       tabId,
     );
   } catch {

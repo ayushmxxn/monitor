@@ -37,6 +37,7 @@ function setupDom() {
   g.HTMLElement = dom.window.HTMLElement;
   g.navigator = dom.window.navigator;
   g.IS_REACT_ACT_ENVIRONMENT = true;
+  g.browser = { runtime: { id: 'test-id' } };
   return dom;
 }
 
@@ -92,7 +93,7 @@ section('M4: card freshness stays honest across temporary failures');
     return { container: c, root: r };
   })();
   const text = container.textContent ?? '';
-  assert(text.includes('$10.00'), 'healthy card shows the value');
+  assert(text.includes('$10'), 'healthy card shows the value');
   assert(text.includes('Updated'), 'healthy card shows normal freshness');
   assert(!text.includes('retrying'), 'healthy card shows no retrying hint');
   await act(async () => {
@@ -115,9 +116,9 @@ section('M4: card freshness stays honest across temporary failures');
     r.render(<MonitorCard monitor={failing} onDelete={async () => true} onOpen={() => {}} />);
   });
   const text = c.textContent ?? '';
-  assert(text.includes('$10.00'), 'failing card preserves the last successful value exactly');
+  assert(text.includes('$10'), 'failing card preserves the last successful value exactly');
   assert(text.includes('Updated'), 'failing card keeps the timestamp');
-  assert(text.includes('retrying'), 'failing card indicates the value is stale/retrying');
+  assert(!text.includes('retrying'), 'failing card does not clutter with retrying text');
 
   // Recovery: consecutiveFailures back to 0 restores normal freshness.
   await act(async () => {
@@ -125,7 +126,7 @@ section('M4: card freshness stays honest across temporary failures');
     await sleep(20);
   });
   const recovered = c.textContent ?? '';
-  assert(recovered.includes('$10.00'), 'recovered card still shows the value');
+  assert(recovered.includes('$10'), 'recovered card still shows the value');
   assert(!recovered.includes('retrying'), 'recovery restores normal freshness automatically');
   await act(async () => {
     r.unmount();

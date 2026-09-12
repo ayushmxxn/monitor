@@ -14,9 +14,9 @@
  * next check starts from the element's current DOM position.
  */
 
-import type { ElementFingerprint } from './fingerprint';
-import type { DiagnosticCode } from './diagnostics';
-import type { SemanticValue } from './semanticValue';
+import type { DiagnosticCode } from "./diagnostics";
+import type { ElementFingerprint } from "./fingerprint";
+import type { SemanticValue } from "./semanticValue";
 
 /**
  * A check strategy is a pluggable way of retrieving a page's HTML/DOM so
@@ -24,16 +24,16 @@ import type { SemanticValue } from './semanticValue';
  * implementing `CheckStrategy` in `lib/monitors/strategies` and
  * registering it in `STRATEGY_ORDER` - nothing here needs to change.
  */
-export type MonitorCheckStrategy = 'fetch' | 'live';
+export type MonitorCheckStrategy = "fetch" | "live";
 
-export type ExtractMode = 'text' | 'attribute';
+export type ExtractMode = "text" | "attribute";
 
 export type MonitorStatus =
-  | 'idle'
-  | 'checking'
-  | 'unchanged'
-  | 'changed'
-  | 'error';
+  | "idle"
+  | "checking"
+  | "unchanged"
+  | "changed"
+  | "error";
 
 /** Minimum allowed check interval. Keeps `chrome.alarms` usage sane and page load polite. */
 export const MIN_INTERVAL_MINUTES = 5;
@@ -113,12 +113,12 @@ export interface HistoricalStats {
 }
 
 export type AlertConditionType =
-  | 'any'
-  | 'decrease'
-  | 'increase'
-  | 'below'
-  | 'above'
-  | 'matches';
+  | "any"
+  | "decrease"
+  | "increase"
+  | "below"
+  | "above"
+  | "matches";
 
 export interface AlertCondition {
   type: AlertConditionType;

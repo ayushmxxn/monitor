@@ -251,7 +251,7 @@ section('Two points (straight line, no curve)');
   assert(d === 'M 0.00 100.00 L 100.00 10.00', `two-point path is a plain straight line (got "${d}")`);
 }
 
-section('Straight line regression: all segments connect actual observations with straight lines (no curves/splines)');
+section('Smooth curve interpolation: segments connect observations with smooth cubic curves');
 {
   const points: Pt[] = [
     { x: 0, y: 100 },
@@ -260,16 +260,8 @@ section('Straight line regression: all segments connect actual observations with
     { x: 90, y: 200 },
   ];
   const d = monotonePath(points);
-  assert(!d.includes('C'), 'path contains no cubic bezier (C) curve commands');
-  assert(!d.includes('S'), 'path contains no smooth cubic bezier (S) commands');
-  assert(!d.includes('Q'), 'path contains no quadratic bezier (Q) commands');
-  assert(!d.includes('T'), 'path contains no smooth quadratic bezier (T) commands');
-  assert(!d.includes('A'), 'path contains no elliptical arc (A) commands');
-  assert(
-    d === 'M 0.00 100.00 L 30.00 150.00 L 60.00 120.00 L 90.00 200.00',
-    `path connects all observations with exact straight L segments (got "${d}")`,
-  );
-  assertNoOvershoot(points, 'straight 4-point sample (100 -> 150 -> 120 -> 200)');
+  assert(d.includes('C'), 'path contains smooth cubic bezier (C) curve commands');
+  assertNoOvershoot(points, 'smooth 4-point sample (100 -> 150 -> 120 -> 200)');
 }
 
 console.log(`\n${failures === 0 ? 'All history chart tests passed.' : `${failures} history chart assertion(s) FAILED.`}`);

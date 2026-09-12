@@ -47,29 +47,29 @@
     --radius: 0.625rem;
   }
 
-  /* A calm graphite palette rather than pure black. It keeps surfaces
-     * distinct, gives borders enough contrast, and avoids the harsh
-     * "lights-off" look common in low-quality dark themes. */
+  /* Pure, high-contrast obsidian dark palette inspired by Linear, Raycast, and Vercel.
+   * Replaces murky blue/slate grays and muddy borders with deep carbon tones,
+   * subtle hairline borders, and crisp, legible typography. */
   .dark {
-    --background: 220 9% 13%;
-    --foreground: 210 20% 94%;
-    --card: 220 9% 15%;
-    --card-foreground: 210 20% 94%;
-    --popover: 220 9% 17%;
-    --popover-foreground: 210 20% 94%;
-    --primary: 210 20% 94%;
-    --primary-foreground: 220 9% 13%;
-    --secondary: 220 8% 21%;
-    --secondary-foreground: 210 20% 94%;
-    --muted: 220 8% 19%;
-    --muted-foreground: 215 12% 67%;
-    --accent: 220 8% 25%;
-    --accent-foreground: 210 20% 96%;
-    --destructive: 0 67% 58%;
+    --background: 0 0% 5.5%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 8.5%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 9.5%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 0 0% 9%;
+    --secondary: 0 0% 12%;
+    --secondary-foreground: 0 0% 92%;
+    --muted: 0 0% 11%;
+    --muted-foreground: 0 0% 58%;
+    --accent: 0 0% 14.5%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
-    --border: 220 8% 27%;
-    --input: 220 8% 29%;
-    --ring: 210 20% 86%;
+    --border: 0 0% 13.5%;
+    --input: 0 0% 15%;
+    --ring: 0 0% 80%;
   }
 
   * {
@@ -147,6 +147,21 @@
     animation: enter-up 0.32s cubic-bezier(0.22, 1, 0.36, 1) backwards;
   }
 
+  @keyframes enter-down {
+    from {
+      opacity: 0;
+      transform: translateY(-6px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  .animate-enter-down {
+    animation: enter-down 0.32s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  }
+
   @keyframes dialog-scale-in {
     from {
       opacity: 0;
@@ -184,6 +199,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     .animate-enter-up,
+    .animate-enter-down,
     .skeleton-shimmer,
     .animate-dialog-scale-in {
       animation: none;
@@ -245,4 +261,111 @@
       stroke-dashoffset: 0;
     }
   }
+
+  /* Transitions.dev "Spinning counter" (P26) animation:
+     Odometer/slot-machine reel spin with cubic-bezier(0.16, 1, 0.3, 1),
+     vertical edge softening mask, and directional blur decay. */
+  .t-counter {
+    display: inline-flex;
+    align-items: baseline;
+    height: 1.1em;
+    line-height: 1.1;
+    max-width: 100%;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    contain: layout paint;
+  }
+
+  .t-counter > span {
+    display: inline-flex;
+    align-items: baseline;
+    height: 1.1em;
+    line-height: 1.1;
+  }
+
+  .t-counter-col {
+    display: inline-block;
+    position: relative;
+    height: 1.1em;
+    line-height: 1.1;
+    overflow: hidden;
+    vertical-align: baseline;
+    contain: paint;
+  }
+
+  .t-counter-col.is-spinning {
+    -webkit-mask-image: linear-gradient(
+      to bottom,
+      transparent 0%,
+      #000 18%,
+      #000 82%,
+      transparent 100%
+    );
+    mask-image: linear-gradient(
+      to bottom,
+      transparent 0%,
+      #000 18%,
+      #000 82%,
+      transparent 100%
+    );
+  }
+
+  .t-counter-strip {
+    display: flex;
+    flex-direction: column;
+    will-change: transform, filter;
+  }
+
+  .t-counter-col.is-spinning .t-counter-strip {
+    animation: t-reel-spin 1400ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+    animation-delay: var(--delay, 0ms);
+  }
+
+  .t-counter-digit {
+    height: 1.1em;
+    line-height: 1.1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .t-counter-digit::before {
+    content: attr(data-digit);
+  }
+
+  .t-counter-sep {
+    display: inline-block;
+    height: 1.1em;
+    line-height: 1.1;
+    vertical-align: baseline;
+    white-space: pre;
+  }
+
+  @keyframes t-reel-spin {
+    0% {
+      transform: translateY(0%);
+      filter: blur(1.5px);
+    }
+    55% {
+      filter: blur(1.5px);
+    }
+    100% {
+      transform: translateY(var(--target-y));
+      filter: blur(0px);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .t-counter-col.is-spinning .t-counter-strip {
+      animation: none !important;
+      transform: none !important;
+      filter: none !important;
+    }
+    .t-counter-col.is-spinning {
+      -webkit-mask-image: none !important;
+      mask-image: none !important;
+    }
+  }
 }
+

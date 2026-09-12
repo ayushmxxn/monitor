@@ -9,14 +9,14 @@
  * Add one entry per message. Keep payloads small and serializable -
  * anything crossing an extension messaging boundary is JSON-serialized.
  */
-import type { ElementFingerprint } from '@/lib/monitors/fingerprint';
-import type { Diagnostic } from '@/lib/monitors/diagnostics';
-import type { SemanticValue } from '@/lib/monitors/semanticValue';
-import type { TestDeliveryInput } from '@/lib/monitors/testDelivery';
+import type { Diagnostic } from "@/lib/monitors/diagnostics";
+import type { ElementFingerprint } from "@/lib/monitors/fingerprint";
+import type { SemanticValue } from "@/lib/monitors/semanticValue";
+import type { TestDeliveryInput } from "@/lib/monitors/testDelivery";
 
 export interface ProtocolMap {
   /** Liveness check. Used by the UI to confirm the background worker is running. */
-  ping(): 'pong';
+  ping(): "pong";
 
   /** Basic runtime info, useful for a "diagnostics" or "about" panel. */
   getAppInfo(): AppInfo;
@@ -57,7 +57,11 @@ export interface ProtocolMap {
    * the panel's "Add" trigger finds out it's safe to start another
    * one. See `lib/monitors/pickerFlow.ts`.
    */
-  elementPickerFinished(result: { saved: boolean; monitorName: string | null }): void;
+  elementPickerFinished(result: {
+    saved: boolean;
+    monitorName: string | null;
+    monitorId?: string | null;
+  }): void;
 
   /** Opens the extension's options page. The panel runs inside a content script, which has no `chrome.tabs` access, so opening a real tab has to be delegated to the background worker. */
   openOptionsPage(): { ok: boolean };
@@ -96,7 +100,7 @@ export interface ProtocolMap {
 export interface ParseHtmlInput {
   html: string;
   fingerprint: ElementFingerprint;
-  extractMode: 'text' | 'attribute';
+  extractMode: "text" | "attribute";
   attributeName: string | null;
 }
 
@@ -110,12 +114,12 @@ export interface ParseHtmlResult {
 }
 
 export type ExtensionInstallType =
-  | 'development'
-  | 'normal'
-  | 'sideload'
-  | 'other'
-  | 'admin'
-  | 'unknown';
+  | "development"
+  | "normal"
+  | "sideload"
+  | "other"
+  | "admin"
+  | "unknown";
 
 export interface AppInfo {
   version: string;
