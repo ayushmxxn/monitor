@@ -100,7 +100,7 @@ export default defineConfig({
   manifest: {
     name: 'Monitor',
     description:
-      'Monitor any value on any website. Local-first, private, no account required. Adaptive fingerprint-based element recovery for reliable monitoring across modern SPAs.',
+      'Monitor any value on any website. Local-first, private, no account required.',
     version: '0.1.0',
     // No popup, side panel, or other declarative UI entrypoint - the
     // extension's UI is a panel injected into the page itself (see
