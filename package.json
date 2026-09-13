@@ -2,7 +2,7 @@
   "name": "monitor-ext",
   "description": "Local-first Chrome extension for monitoring any value on any website",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "wxt",

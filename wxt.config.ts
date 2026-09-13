@@ -101,7 +101,7 @@ export default defineConfig({
     name: 'Monitor',
     description:
       'Monitor any value on any website. Local-first, private, no account required. Adaptive fingerprint-based element recovery for reliable monitoring across modern SPAs.',
-    version: '0.2.1',
+    version: '0.1.0',
     // No popup, side panel, or other declarative UI entrypoint - the
     // extension's UI is a panel injected into the page itself (see
     // entrypoints/panel.content.tsx), so `action` has to be declared
