@@ -513,8 +513,8 @@ function PanelContent({
         // No `border-l`: the resize handle already renders its own
         // hairline on the left edge (see the separator below), so a
         // full `border` here would double it up as two adjacent lines.
-        'border-y border-r border-black/[0.08] dark:border-white/[0.08] bg-background text-foreground',
-        'shadow-[0_1px_1px_rgba(0,0,0,0.03),0_12px_28px_-8px_rgba(0,0,0,0.22),0_32px_64px_-24px_rgba(0,0,0,0.28)] dark:shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_16px_36px_-6px_rgba(0,0,0,0.7),0_32px_64px_-16px_rgba(0,0,0,0.85)]',
+        'border-y border-r border-black/[0.08] dark:border-border bg-background text-foreground',
+        'shadow-[0_1px_1px_rgba(0,0,0,0.03),0_12px_28px_-8px_rgba(0,0,0,0.22),0_32px_64px_-24px_rgba(0,0,0,0.28)] dark:shadow-[0_8px_24px_-4px_rgba(0,0,0,0.4),0_20px_48px_-8px_rgba(0,0,0,0.5)]',
         'transition-transform duration-200',
         !isOpen && 'translate-x-[calc(100%+20px)]',
         isDragging.current && 'transition-none',
@@ -607,7 +607,12 @@ function PanelContent({
           </div>
         </header>
 
-        <main className="flex flex-1 flex-col gap-3 overflow-y-auto p-3">
+        <main
+          className={cn(
+            'flex flex-1 flex-col gap-3 overflow-y-auto overflow-x-hidden',
+            view === 'detail' ? 'px-1.5 py-3' : 'p-3',
+          )}
+        >
           {isInvalidated ? (
             // Every other view here relies on chrome.runtime/chrome.storage,
             // which will keep failing the same way until the page reloads -

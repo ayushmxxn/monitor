@@ -10,7 +10,7 @@
     "zip": "wxt zip",
     "compile": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test": "bun test/safetyNet.test.ts && bun test/pipeline.test.ts && bun test/historyChart.test.ts && bun test/adaptiveFormat.test.ts && bun test/numberPopIn.test.tsx && bun test/confettiBurst.test.tsx && bun test/checkStage.test.tsx && bun test/fontIsolation.test.ts && bun test/browserFontRegression.test.ts",
+    "test": "bun test/safetyNet.test.ts && bun test/pipeline.test.ts && bun test/historyChart.test.ts && bun test/adaptiveFormat.test.ts && bun test/numberPopIn.test.tsx && bun test/confettiBurst.test.tsx && bun test/checkStage.test.tsx && bun test/fontIsolation.test.ts && bun test/browserFontRegression.test.ts && bun test/cuelumeSparkle.test.ts",
     "test:safety": "bun test/safetyNet.test.ts",
     "test:chart": "bun test/historyChart.test.ts",
     "test:browser-font": "bun test/browserFontRegression.test.ts",
@@ -19,6 +19,7 @@
   "dependencies": {
     "@webext-core/messaging": "^4.0.0",
     "clsx": "^2.1.1",
+    "cuelume": "^0.2.2",
     "lucide-react": "^1.33.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",

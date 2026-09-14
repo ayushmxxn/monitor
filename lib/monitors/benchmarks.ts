@@ -6,6 +6,7 @@ import {
   formatStorageBytes,
   formatDurationSeconds,
   detectSemanticValue,
+  isCompatibleSemanticKind,
 } from './semanticValue';
 import type { HistoricalStats, MonitorCheck } from './types';
 
@@ -114,7 +115,13 @@ export function calculateHistoricalBenchmarks(
     return null;
   }
 
-  const numericPoints = parsedPoints.filter((p) => p.sem.type === refType);
+  // History may span a reclassification of the same metric (a bare
+  // token one check, its labeled rendering the next — e.g. "1.17m" as
+  // count, then "1.17m subscribers" as followers). Kinds in the same
+  // magnitude family (count/followers/views) are the same series;
+  // every other kind stays strict so currency/percentage/duration can
+  // never share a line.
+  const numericPoints = parsedPoints.filter((p) => isCompatibleSemanticKind(p.sem.type, refType));
   if (numericPoints.length < 2) {
     return null;
   }
@@ -167,7 +174,7 @@ export function calculateHistoricalBenchmarks(
 
     if (
       currSem &&
-      currSem.type === refType &&
+      isCompatibleSemanticKind(currSem.type, refType) &&
       currSem.normalized !== null &&
       Number.isFinite(currSem.normalized)
     ) {

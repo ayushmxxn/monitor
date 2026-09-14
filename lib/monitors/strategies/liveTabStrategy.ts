@@ -310,6 +310,11 @@ async function runLiveCheck(monitor: Monitor): Promise<StrategyOutcome> {
       // good value inside the same live read; absent/never-checked
       // means the plain pipeline runs exactly as before.
       monitor.lastValue,
+      // Expected check URL is compared per-read inside the page agent
+      // against the live document URL, so a mid-check SPA navigation is
+      // judged at read time. Same page → title edit (penalize, don't
+      // clamp); different page → keep the severe cross-page clamp.
+      { expectedCheckUrl: checkUrl },
     );
 
     return {

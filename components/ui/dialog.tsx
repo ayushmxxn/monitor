@@ -104,7 +104,7 @@ export function DialogContent({
         tabIndex={-1}
         className={cn(
           inPanel ? 'absolute' : 'fixed',
-          'left-1/2 top-1/2 z-50 w-[calc(100%-2.5rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-lg border border-black/[0.06] bg-popover p-4 text-popover-foreground shadow-2xl font-sans',
+          'left-1/2 top-1/2 z-50 w-[calc(100%-2.5rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-lg border border-black/[0.06] dark:border-border bg-popover p-4 text-popover-foreground shadow-2xl font-sans',
           'origin-center animate-dialog-scale-in focus:outline-none',
           className,
         )}

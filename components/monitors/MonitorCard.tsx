@@ -101,7 +101,7 @@ export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen
   return (
     <div
       className={cn(
-        "group relative overflow-hidden rounded-lg bg-muted/50 transition-all duration-150 ease-out hover:bg-accent active:scale-[0.985] origin-center",
+        "group relative overflow-hidden rounded-lg bg-muted/50 dark:bg-card transition-all duration-150 ease-out hover:bg-accent active:scale-[0.985] origin-center",
         isRemoving &&
           "pointer-events-none scale-[0.92] opacity-0 blur-[1.5px] duration-200 ease-out motion-reduce:scale-100 motion-reduce:blur-0 motion-reduce:transition-none",
       )}

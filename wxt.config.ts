@@ -135,7 +135,7 @@ export default defineConfig({
     // listed rather than each size individually.
     web_accessible_resources: [
       {
-        resources: ['icon/*.png', 'credit-avatar.webp'],
+        resources: ['icon/*.png', 'credit-avatar.webp', 'fonts/*'],
         matches: ['<all_urls>'],
       },
     ],

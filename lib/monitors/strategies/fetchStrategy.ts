@@ -1,7 +1,7 @@
 import { sendMessage } from '@/lib/messaging';
 import { ensureOffscreenDocument } from '../offscreenManager';
 import { diagnostic } from '../diagnostics';
-import { resolveCheckUrl } from '../itemUrl';
+import { isSameCanonicalCheckUrl, resolveCheckUrl } from '../itemUrl';
 import type { CheckStrategy, StrategyOutcome } from './types';
 
 /** How long to wait for a response before giving up and falling back to the live-tab strategy. */
@@ -23,6 +23,7 @@ export const fetchStrategy: CheckStrategy = {
     // monitor's own page - unchanged behavior for every non-feed monitor.
     const checkUrl = resolveCheckUrl(monitor);
     let html: string;
+    let finalUrl: string | null = null;
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -53,6 +54,11 @@ export const fetchStrategy: CheckStrategy = {
         };
       }
       html = await response.text();
+      try {
+        finalUrl = response.url || null;
+      } catch {
+        finalUrl = null;
+      }
     } catch (error) {
       const isAbort = error instanceof Error && error.name === 'AbortError';
       return {
@@ -78,6 +84,10 @@ export const fetchStrategy: CheckStrategy = {
         // good value inside the same parse; absent/never-checked means
         // the plain pipeline runs exactly as before.
         reanchorLastValue: monitor.lastValue,
+        // Same canonical page (no redirect to a different page):
+        // landmark change is a title edit, don't clamp. Redirected
+        // elsewhere stays strict. Absent/unparseable stays strict.
+        samePage: finalUrl ? isSameCanonicalCheckUrl(checkUrl, finalUrl) : undefined,
       });
       return result;
     } catch (error) {

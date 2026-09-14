@@ -779,27 +779,49 @@ export function findItemAnchor(el: Element, cache?: ItemAnchorCache): ItemAnchor
   return bestAnchor;
 }
 
+function isLevelOneHeading(el: Element): boolean {
+  if (el.tagName === 'H1') return true;
+  return el.getAttribute('role') === 'heading' && el.getAttribute('aria-level') === '1';
+}
+
+function isAnyHeading(el: Element): boolean {
+  return /^H[1-6]$/.test(el.tagName) || el.getAttribute('role') === 'heading';
+}
+
 function findLandmarkText(el: Element): string | null {
-  let node: Element | null = el;
-  let hops = 0;
-  while (node && hops < 8) {
-    let sib = node.previousElementSibling;
-    let sibHops = 0;
-    while (sib && sibHops < 6) {
-      if (/^H[1-6]$/.test(sib.tagName) || sib.getAttribute('role') === 'heading') {
-        const text = normalizeText(sib.textContent ?? '');
+  // Two-phase walk: page identity (H1 / level-1 heading) wins over
+  // section headings (H2/H3, e.g. a lazily-mounted "Up next" shelf
+  // inserted between the title and the target). A single-pass
+  // nearest-heading search lets that insertion hijack the landmark and
+  // trip the identity-conflict clamp for the correct element. H1-first
+  // keeps same-page recovery stable while a genuine H1 change (a
+  // different video/article) still mismatches and stays rejected.
+  for (let phase = 0; phase < 2; phase += 1) {
+    const levelOneOnly = phase === 0;
+    let node: Element | null = el;
+    let hops = 0;
+    while (node && hops < 8) {
+      let sib = node.previousElementSibling;
+      let sibHops = 0;
+      while (sib && sibHops < 6) {
+        const isMatch = levelOneOnly ? isLevelOneHeading(sib) : isAnyHeading(sib);
+        if (isMatch) {
+          const text = normalizeText(sib.textContent ?? '');
+          if (text) return text.slice(0, 80);
+        }
+        sib = sib.previousElementSibling;
+        sibHops += 1;
+      }
+      const heading = node.querySelector?.(
+        levelOneOnly ? 'h1, [role="heading"][aria-level="1"]' : 'h1, h2, h3, [role="heading"]',
+      );
+      if (heading && heading !== el) {
+        const text = normalizeText(heading.textContent ?? '');
         if (text) return text.slice(0, 80);
       }
-      sib = sib.previousElementSibling;
-      sibHops += 1;
+      node = node.parentElement;
+      hops += 1;
     }
-    const heading = node.querySelector?.('h1, h2, h3, [role="heading"]');
-    if (heading && heading !== el) {
-      const text = normalizeText(heading.textContent ?? '');
-      if (text) return text.slice(0, 80);
-    }
-    node = node.parentElement;
-    hops += 1;
   }
   return null;
 }
@@ -1010,29 +1032,72 @@ export function findLikelyContainer(doc: Document, fp: ElementFingerprint): Elem
   // Resolve any outer (shadow-crossing) prefix first - the ancestor
   // walk below only ever happens within the innermost shadow root (or
   // the light document, when there's no shadow crossing at all).
+  // Every successfully resolved host is remembered so a leaf-only
+  // innermost segment (the normal shape for a stable-id target in
+  // shadow DOM, e.g. `#subscriber-count`) can still fall back to its
+  // nearest outer host instead of giving up and forcing a page-wide
+  // wait on a page that may never go fully quiet.
+  const resolvedHosts: Element[] = [];
   let scanRoot: Document | Element | ShadowRoot = doc;
   for (const seg of shadowSegments.slice(0, -1)) {
     let host: Element | null;
     try {
       host = (scanRoot as Document | Element).querySelector(seg);
     } catch {
-      return null;
+      break;
     }
-    if (!host?.shadowRoot) return null;
+    if (!host?.shadowRoot) break;
+    if (host !== doc.body && host !== doc.documentElement) resolvedHosts.push(host);
     scanRoot = host.shadowRoot;
   }
+  // If the prefix broke partway, only the hosts resolved so far are
+  // usable — anything deeper was never reached. The innermost walk
+  // below still runs against the deepest reachable root; when it finds
+  // nothing, the outward fallback underneath returns the deepest host.
+  const prefixFullyResolved =
+    resolvedHosts.length === Math.max(0, shadowSegments.length - 1);
 
   const lastSegment = shadowSegments[shadowSegments.length - 1] ?? '';
   const parts = lastSegment.split('>').map((s) => s.trim()).filter(Boolean);
-  for (let i = parts.length - 2; i >= 0; i--) {
-    const selector = parts.slice(0, i + 1).join(' > ');
-    let el: Element | null;
-    try {
-      el = (scanRoot as Document | Element).querySelector(selector);
-    } catch {
-      continue;
+  // When the prefix itself broke, the stored innermost segment belongs
+  // to an unreachable shadow root — resolving it against the deepest
+  // reachable root would be a wrong-tree guess, so skip it and fall
+  // straight through to the outward host fallback.
+  if (prefixFullyResolved) {
+    for (let i = parts.length - 2; i >= 0; i--) {
+      const selector = parts.slice(0, i + 1).join(' > ');
+      let el: Element | null;
+      try {
+        el = (scanRoot as Document | Element).querySelector(selector);
+      } catch {
+        continue;
+      }
+      if (el && el !== doc.body && el !== doc.documentElement) return el;
     }
-    if (el && el !== doc.body && el !== doc.documentElement) return el;
+  }
+  // Outward fallback: the innermost segment was leaf-only (a bare
+  // stable id) or its ancestors no longer resolve — scope the wait to
+  // the nearest still-mounted outer shadow host rather than the whole
+  // page. Readiness-only hint, never a match, so a broader-than-ideal
+  // host only costs time, never correctness.
+  for (let k = resolvedHosts.length - 1; k >= 0; k -= 1) {
+    const host = resolvedHosts[k]!;
+    if (host.isConnected && host !== doc.body && host !== doc.documentElement) return host;
+  }
+  // Leaf fallback: a light-DOM leaf-only selector (a bare stable id
+  // like `#owner-sub-count`) has neither ancestor parts nor outer
+  // hosts to fall back to. If the leaf itself still resolves, scope to
+  // its parent — the target's own neighborhood — rather than the whole
+  // endlessly-mutating page. Readiness-only hint, never a match.
+  try {
+    const leaf = deepQuerySelector(doc, fp.cssSelector);
+    if (leaf?.isConnected) {
+      const parent = leaf.parentElement;
+      if (parent && parent.isConnected && parent !== doc.body && parent !== doc.documentElement) return parent;
+      if (leaf !== doc.body && leaf !== doc.documentElement) return leaf;
+    }
+  } catch {
+    // Invalid selector — no container.
   }
   return null;
 }
@@ -1202,7 +1267,7 @@ export function scoreCandidate(
   fp: ElementFingerprint,
   candidate: Element,
   itemAnchorCache?: ItemAnchorCache,
-  options?: { allowEmpty?: boolean; attributeName?: string | null },
+  options?: { allowEmpty?: boolean; attributeName?: string | null; samePage?: boolean },
 ): ScoredCandidate {
   const signals: Record<string, number> = {};
   let weightedSum = 0;
@@ -1294,7 +1359,17 @@ export function scoreCandidate(
     const b = fp.landmarkText.toLowerCase();
     const isMatch = a === b || a.includes(b) || b.includes(a);
     if (!isMatch) {
-      itemIdentityConflict = true;
+      // Same canonical page (e.g. a title edit on the same video):
+      // penalize via the ordinary landmark signal below, don't clamp.
+      // Different page (e.g. SPA navigation to another video): keep the
+      // severe clamp — every template twin shares tag/classes/position,
+      // the heading is the only thing telling them apart. `samePage`
+      // absent (older callers/tests) stays strict to preserve existing
+      // cross-page protection. Item-identity conflicts below always
+      // clamp, same page or not.
+      if (options?.samePage !== true) {
+        itemIdentityConflict = true;
+      }
     }
   }
   add('landmarkText', 8, fp.landmarkText !== null, (() => {
@@ -1675,7 +1750,7 @@ function runRecoveryScan(
   doc: Document,
   itemAnchorCache: ItemAnchorCache,
   acceptThreshold: number,
-  scanOptions?: { attributeName?: string | null },
+  scanOptions?: { attributeName?: string | null; samePage?: boolean },
 ): {
   candidates: Element[];
   sorted: ScoredCandidate[];
@@ -1690,7 +1765,7 @@ function runRecoveryScan(
   const scored: ScoredCandidate[] = [];
   for (const el of candidates) {
     if (scored.length >= MAX_SCORED) break;
-    scored.push(scoreCandidate(fp, el, itemAnchorCache, { allowEmpty: false, attributeName: scanOptions?.attributeName ?? null }));
+    scored.push(scoreCandidate(fp, el, itemAnchorCache, { allowEmpty: false, attributeName: scanOptions?.attributeName ?? null, samePage: scanOptions?.samePage }));
   }
   scored.sort((a, b) => b.score - a.score);
   const best = scored[0] ?? null;
@@ -1719,7 +1794,7 @@ function runRecoveryScan(
 export function locateElementWithRanking(
   fp: ElementFingerprint,
   doc: Document,
-  options?: { acceptThreshold?: number; limit?: number; attributeName?: string | null },
+  options?: { acceptThreshold?: number; limit?: number; attributeName?: string | null; samePage?: boolean },
 ): {
   locate: LocateResult;
   ranked: ScoredCandidate[];
@@ -1728,6 +1803,7 @@ export function locateElementWithRanking(
   const acceptThreshold = options?.acceptThreshold ?? 55;
   const limit = options?.limit ?? MAX_RECOVERY_FALLBACK_CANDIDATES;
   const attributeName = options?.attributeName ?? null;
+  const samePage = options?.samePage;
   // Shared for the whole call so every candidate that shares an item
   // root (every cell in the same table row, every child of the same
   // feed item) reuses that root's already-scanned identity data instead
@@ -1737,7 +1813,7 @@ export function locateElementWithRanking(
 
   const fastSelector = deepQuerySelector(doc, fp.cssSelector);
   if (fastSelector) {
-    const scored = scoreCandidate(fp, fastSelector, itemAnchorCache);
+    const scored = scoreCandidate(fp, fastSelector, itemAnchorCache, { samePage });
     if (scored.score >= acceptThreshold) {
       return {
         locate: { ...scored, candidatesConsidered: 1, method: 'fast-path-selector' },
@@ -1755,7 +1831,7 @@ export function locateElementWithRanking(
   // covers shadow-DOM elements on the fast path; the recovery scan
   // below covers them for everything else via `collectDeep`.
   if (fastXpath && fastXpath !== fastSelector) {
-    const scored = scoreCandidate(fp, fastXpath, itemAnchorCache);
+    const scored = scoreCandidate(fp, fastXpath, itemAnchorCache, { samePage });
     if (scored.score >= acceptThreshold) {
       return {
         locate: { ...scored, candidatesConsidered: 1, method: 'fast-path-xpath' },
@@ -1765,7 +1841,7 @@ export function locateElementWithRanking(
     }
   }
 
-  const scan = runRecoveryScan(fp, doc, itemAnchorCache, acceptThreshold, { attributeName });
+  const scan = runRecoveryScan(fp, doc, itemAnchorCache, acceptThreshold, { attributeName, samePage });
   // A recovered candidate that is effectively tied with another item is
   // not trustworthy enough to monitor. This intentionally favors a clear
   // "needs review" result over silently switching to a duplicate metric.
@@ -1821,7 +1897,7 @@ export function locateElementWithRanking(
 export function locateElement(
   fp: ElementFingerprint,
   doc: Document,
-  options?: { acceptThreshold?: number },
+  options?: { acceptThreshold?: number; samePage?: boolean },
 ): LocateResult {
   return locateElementWithRanking(fp, doc, options).locate;
 }
@@ -1849,7 +1925,7 @@ export const MAX_RECOVERY_FALLBACK_CANDIDATES = 12;
 export function rankRecoveryCandidates(
   fp: ElementFingerprint,
   doc: Document,
-  options?: { acceptThreshold?: number; limit?: number; attributeName?: string | null },
+  options?: { acceptThreshold?: number; limit?: number; attributeName?: string | null; samePage?: boolean },
 ): { ranked: ScoredCandidate[]; candidatesConsidered: number; ambiguous: boolean } {
   // Standalone contract (unchanged): always a full recovery scan,
   // independent of whether the fast path would hit. `locateAndExtract`
@@ -1860,6 +1936,7 @@ export function rankRecoveryCandidates(
   const itemAnchorCache: ItemAnchorCache = new Map();
   const scan = runRecoveryScan(fp, doc, itemAnchorCache, acceptThreshold, {
     attributeName: options?.attributeName ?? null,
+    samePage: options?.samePage,
   });
   if (scan.ambiguous) {
     return { ranked: [], candidatesConsidered: scan.candidates.length, ambiguous: true };

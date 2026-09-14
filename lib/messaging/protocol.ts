@@ -95,6 +95,11 @@ export interface ProtocolMap {
    * even for valid URLs.
    */
   testWebhookDelivery(input: TestDeliveryInput): boolean;
+
+  /**
+   * Plays a Cuelume interaction sound cue in the active tab / panel.
+   */
+  playCue(input: { cue: "sparkle" | "error"; volume: number }): void;
 }
 
 export interface ParseHtmlInput {
@@ -108,6 +113,13 @@ export interface ParseHtmlInput {
    * working; absent means "no re-anchor" and behavior is unchanged.
    */
   reanchorLastValue?: string | null;
+  /**
+   * Same-page identity for landmark scoping (see `LocatePageContext`).
+   * Computed by the caller from check URL vs final response URL because
+   * the offscreen parsed document has no meaningful base URL of its own.
+   * Absent stays strict to preserve cross-page protection.
+   */
+  samePage?: boolean;
 }
 
 export interface ParseHtmlResult {

@@ -3,6 +3,8 @@ import { Panel, type PanelHandle } from '@/components/panel/Panel';
 import { applyShadowHostIsolation } from '@/lib/ui/shadowHost';
 import { onMessage } from '@/lib/messaging';
 import { EXTENSION_INVALIDATED_EVENT } from '@/hooks/useExtensionInvalidated';
+import { ensureInterLoaded } from '@/lib/ui/font';
+import { play } from 'cuelume';
 // `?inline` bundles the compiled CSS as a plain string at build time
 // instead of relying on WXT's `cssInjectionMode: 'ui'`, which loads
 // styles with a runtime `fetch()` to the extension's own
@@ -51,6 +53,8 @@ export default defineContentScript({
     let handle: PanelHandle | null = null;
 
     document.querySelectorAll('monitor-panel').forEach((el) => el.remove());
+
+    await ensureInterLoaded();
 
     const ui = await createShadowRootUi(ctx, {
       name: 'monitor-panel',
@@ -175,13 +179,25 @@ export default defineContentScript({
     // means the background worker only re-injects this file when
     // there's truly nothing listening yet (fresh tab, or one that
     // navigated and lost its content scripts).
-    const unregister = onMessage('togglePanel', () => {
+    const unregisterToggle = onMessage('togglePanel', () => {
       handle?.toggle();
       return { handled: true };
     });
+    const unregisterPlayCue = onMessage('playCue', ({ data }) => {
+      try {
+        play(data.cue, { volume: data.volume });
+      } catch {
+        // ignore audio errors
+      }
+    });
     ctx.onInvalidated(() => {
       try {
-        unregister();
+        unregisterToggle();
+      } catch {
+        // Stale or invalidated context on unmount - ignore.
+      }
+      try {
+        unregisterPlayCue();
       } catch {
         // Stale or invalidated context on unmount - ignore.
       }

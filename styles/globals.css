@@ -46,34 +46,44 @@
     --input: 0 0% 89%;
     --ring: 0 0% 9%;
 
+    --subtext: 0 0% 45%;
+
     --radius: 0.625rem;
   }
 
-  /* Pure, high-contrast obsidian dark palette inspired by Linear, Raycast, and Vercel.
-   * Replaces murky blue/slate grays and muddy borders with deep carbon tones,
-   * subtle hairline borders, and crisp, legible typography. */
+  /* Layered charcoal dark palette:
+   * - Background: #1E1F22 (225 6.3% 12.5%)
+   * - Cards/surfaces: #2B2D31 (220 6.5% 18%)
+   * - Elevated controls: #313338 (223 6.7% 20.6%)
+   * - Hover: #383A40 (225 6.7% 23.5%)
+   * - Borders/dividers: #3F4147 (225 6% 26.3%)
+   * - Primary text: #F2F3F5 (220 13% 95.5%)
+   * - Secondary text: #B5BAC1 (215 8.8% 73.3%)
+   * - Muted text: #949BA4 (214 8.1% 61.2%)
+   */
   .dark {
     color-scheme: dark;
 
-    --background: 0 0% 5.5%;
-    --foreground: 0 0% 98%;
-    --card: 0 0% 8.5%;
-    --card-foreground: 0 0% 98%;
-    --popover: 0 0% 9.5%;
-    --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 0 0% 9%;
-    --secondary: 0 0% 12%;
-    --secondary-foreground: 0 0% 92%;
-    --muted: 0 0% 11%;
-    --muted-foreground: 0 0% 58%;
-    --accent: 0 0% 14.5%;
-    --accent-foreground: 0 0% 98%;
+    --background: 225 6.3% 12.5%;
+    --foreground: 220 13% 95.5%;
+    --card: 220 6.5% 18%;
+    --card-foreground: 220 13% 95.5%;
+    --popover: 220 6.5% 18%;
+    --popover-foreground: 220 13% 95.5%;
+    --primary: 220 13% 95.5%;
+    --primary-foreground: 225 6.3% 12.5%;
+    --secondary: 223 6.7% 20.6%;
+    --secondary-foreground: 215 8.8% 73.3%;
+    --muted: 223 6.7% 20.6%;
+    --muted-foreground: 214 8.1% 61.2%;
+    --accent: 225 6.7% 23.5%;
+    --accent-foreground: 220 13% 95.5%;
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
-    --border: 0 0% 13.5%;
-    --input: 0 0% 15%;
-    --ring: 0 0% 80%;
+    --border: 225 6% 26.3%;
+    --input: 225 6% 26.3%;
+    --ring: 225 6% 26.3%;
+    --subtext: 215 8.8% 73.3%;
   }
 
   select option {

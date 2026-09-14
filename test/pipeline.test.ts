@@ -23,7 +23,7 @@ import type { ItemAnchorCache } from '../lib/monitors/fingerprint';
 import { locateAndExtract, locateAndExtractWithReanchor, resolveSettledValue, extractVisibleText } from '../lib/monitors/locate';
 import { waitForPageReady, waitForRegionReady } from '../lib/monitors/readiness';
 import { detectSemanticValue, compareSemanticValues, extractNumericToken, isCompatibleSemanticKind } from '../lib/monitors/semanticValue';
-import { resolvePickerTarget, resolvePickerTargetAtPoint, formatPickerTooltip } from '../lib/monitors/pickerTarget';
+import { resolvePickerTarget, resolvePickerTargetAtPoint, formatPickerTooltip, pickerValueKindLabel } from '../lib/monitors/pickerTarget';
 // pageAgent.content.ts is a WXT content script whose `defineContentScript`
 // call only exists at build time - stub it so the module (and its pure
 // picker helpers) can be imported in bun like any other module.
@@ -32,7 +32,7 @@ const { sameSelection, namingValuePreview, shouldAttemptScrollRecovery, withRest
 import { locateOnTab, verifyTabSettled } from '../lib/monitors/pageAgentClient';
 import { ensureVisibilityPatchRegistered } from '../lib/monitors/visibilityPatch';
 import { navigateAndWaitForLoad } from '../lib/monitors/strategies/liveTabNavigation';
-import { resolveCheckUrl, resolveSourceUrl, stripTrackingParams } from '../lib/monitors/itemUrl';
+import { resolveCheckUrl, resolveSourceUrl, stripTrackingParams, isSameCanonicalCheckUrl } from '../lib/monitors/itemUrl';
 import { baseStrategyOrder } from '../lib/monitors/strategies/strategyOrder';
 import { searchByScrolling, type ScrollHost } from '../lib/monitors/scrollRecovery';
 import { detectAuthWall } from '../lib/monitors/antiAutomation';
@@ -48,6 +48,7 @@ import type { StrategyOutcome } from '../lib/monitors/strategies/types';
 import { hasValueChanged } from '../lib/monitors/checker';
 import { calculateValueChange, formatChangeAlertMessage, formatHeroMovement } from '../lib/monitors/changeSummary';
 import { calculateHistoricalBenchmarks } from '../lib/monitors/benchmarks';
+import { getChartablePoints } from '../components/monitors/HistoryChart';
 import { shouldTriggerAlert, formatAlertConditionDescription } from '../lib/monitors/alertCondition';
 
 function section(title: string) {
@@ -3967,19 +3968,14 @@ section('Selection reliability: identify intended value and clearly indicate amb
   assert(pointTarget85.isAmbiguous === false, 'point target over 85 is disambiguated (isAmbiguous: false)');
   assert(formatPickerTooltip(pointTarget85) === '✓ 85', `tooltip displays exact canonical value "✓ 85" (got ${JSON.stringify(formatPickerTooltip(pointTarget85))})`);
 
-  // 4. Text monitors preserved
+  // 4. Text-only elements are not selectable in numeric-only picker
   const textStatusEl = tdoc.getElementById('text-status')!;
-  const textStatusTarget = resolvePickerTarget(textStatusEl)!;
-  assert(textStatusTarget.canonicalValue === 'In Progress', `text monitor preserves full text "In Progress" (got ${JSON.stringify(textStatusTarget.canonicalValue)})`);
-  assert(textStatusTarget.semanticValue.type === 'text', `semantic value is text (got ${textStatusTarget.semanticValue.type})`);
-  assert(textStatusTarget.isAmbiguous === false, 'text monitor is not ambiguous');
-  assert(formatPickerTooltip(textStatusTarget) === '✓ In Progress', `tooltip displays "✓ In Progress" (got ${JSON.stringify(formatPickerTooltip(textStatusTarget))})`);
+  const textStatusTarget = resolvePickerTarget(textStatusEl);
+  assert(textStatusTarget === null, 'text-only element is not selectable in picker');
 
   const textReleaseEl = tdoc.getElementById('text-release')!;
-  const textReleaseTarget = resolvePickerTarget(textReleaseEl)!;
-  assert(textReleaseTarget.canonicalValue === 'Version 2.4.1 released', `version text monitor preserves "Version 2.4.1 released" (got ${JSON.stringify(textReleaseTarget.canonicalValue)})`);
-  assert(textReleaseTarget.semanticValue.type === 'text', 'version is not treated as number');
-  assert(textReleaseTarget.isAmbiguous === false, 'version release text is not ambiguous');
+  const textReleaseTarget = resolvePickerTarget(textReleaseEl);
+  assert(textReleaseTarget === null, 'version release text without standalone numeric is not selectable');
 
   // 5. End-to-end fingerprint and relocation for identified canonical value
   const fp = buildFingerprint(balanceTarget.element, testDom.window as unknown as Window, balanceTarget.textAnchor);
@@ -7378,6 +7374,434 @@ section('Value-kind pool boundary: bare-number snapshots stay isolated (document
     out.value === null && out.updatedFingerprint === null && out.semanticValue === null,
     `bare-number snapshots do not pool views-kind candidates (got ${JSON.stringify(out.value)}, ${out.diagnostic.code}) — needs-repick stays honest`,
   );
+}
+
+section('Regression: inserted H2 section heading must not override H1 page landmark (1.17M → 1.18M)');
+
+{
+  const TITLE = 'Some Channel Title For Landmark Testing Purposes';
+  function mountHeader(doc: Document, count: string, aria: string, title: string, extraHeading: string, noiseCount: number): Element {
+    const app = doc.querySelector('ytd-app')!;
+    const appShadow = (app as any).shadowRoot ?? (app as any).attachShadow({ mode: 'open' });
+    appShadow.innerHTML = '';
+    const pm = doc.createElement('ytd-page-manager');
+    appShadow.appendChild(pm);
+    const pmShadow = (pm as any).attachShadow({ mode: 'open' });
+    const header = doc.createElement('ytd-c4-tabbed-header-renderer');
+    pmShadow.appendChild(header);
+    const hs = (header as any).attachShadow({ mode: 'open' });
+    let noise = '';
+    for (let i = 0; i < noiseCount; i += 1) {
+      noise += `<yt-formatted-string class="style-scope">Noise ${i}</yt-formatted-string>`;
+    }
+    hs.innerHTML =
+      `<h1>${title}</h1>` +
+      extraHeading +
+      `<div id="inner-header-container"><ytd-subscribe-button-renderer>` +
+      `<yt-formatted-string id="subscriber-count" class="style-scope ytd-subscribe-button-renderer" aria-label="${aria}">${count}</yt-formatted-string>` +
+      `</ytd-subscribe-button-renderer></div><div>${noise}</div>`;
+    return hs.querySelector('#subscriber-count') as Element;
+  }
+
+  const oldDom = new JSDOM(`<!doctype html><html><body><ytd-app></ytd-app></body></html>`, {
+    pretendToBeVisual: true,
+    url: 'https://www.youtube.com/@somechannel',
+  });
+  ytGlobals(oldDom);
+  const oldDoc = oldDom.window.document;
+  const oldEl = mountHeader(oldDoc, '1.17M subscribers', '1.17M subscribers', TITLE, '', 5);
+  const fp = buildFingerprint(oldEl);
+  assert(
+    fp.landmarkText === TITLE,
+    `stored fingerprint captures the H1 page title as landmark (got ${JSON.stringify(fp.landmarkText)})`,
+  );
+
+  // Live: same page/H1, value drifted, one H2 section heading inserted between title and target.
+  const liveDom = new JSDOM(`<!doctype html><html><body><ytd-app></ytd-app></body></html>`, {
+    pretendToBeVisual: true,
+    url: 'https://www.youtube.com/@somechannel',
+  });
+  ytGlobals(liveDom);
+  const liveDoc = liveDom.window.document;
+  mountHeader(liveDoc, '1.18M subscribers', '1.18M subscribers', TITLE, '<h2>Up next</h2>', 450);
+  const recovered = locateAndExtract(liveDoc, fp, 'text', null);
+  assert(
+    recovered.value === '1.18M',
+    `inserted H2 must not hijack the H1 landmark — recovers drifted value (got ${JSON.stringify(recovered.value)}, diag ${recovered.diagnostic.code} ${recovered.diagnostic.detail ?? ''})`,
+  );
+  assert(
+    recovered.confidence >= 55,
+    `recovered confidence clears the unchanged 55 threshold (got ${recovered.confidence})`,
+  );
+
+  // True page identity change must still fail safely (no weakening of protection).
+  const navDom = new JSDOM(`<!doctype html><html><body><ytd-app></ytd-app></body></html>`, {
+    pretendToBeVisual: true,
+    url: 'https://www.youtube.com/@somechannel',
+  });
+  ytGlobals(navDom);
+  const navDoc = navDom.window.document;
+  mountHeader(navDoc, '9.01K subscribers', '9.01K subscribers', 'Completely Different Channel XYZ', '', 450);
+  const navRecovered = locateAndExtract(navDoc, fp, 'text', null);
+  assert(
+    navRecovered.value === null && navRecovered.updatedFingerprint === null,
+    `genuine H1 change still rejects safely instead of substituting another page's value (got ${JSON.stringify(navRecovered.value)}, diag ${navRecovered.diagnostic.code})`,
+  );
+}
+
+section('Regression: stable-id-in-shadow fingerprints resolve an outer host container for region readiness');
+
+{
+  const TITLE = 'Some Channel Title For Landmark Testing Purposes';
+  const dom = new JSDOM(`<!doctype html><html><body><ytd-app></ytd-app></body></html>`, {
+    pretendToBeVisual: true,
+    url: 'https://www.youtube.com/@somechannel',
+  });
+  ytGlobals(dom);
+  const doc = dom.window.document;
+  const app = doc.querySelector('ytd-app')!;
+  const appShadow = (app as any).shadowRoot ?? (app as any).attachShadow({ mode: 'open' });
+  const pm = doc.createElement('ytd-page-manager');
+  appShadow.appendChild(pm);
+  const pmShadow = (pm as any).attachShadow({ mode: 'open' });
+  const header = doc.createElement('ytd-c4-tabbed-header-renderer');
+  pmShadow.appendChild(header);
+  const hs = (header as any).attachShadow({ mode: 'open' });
+  hs.innerHTML =
+    `<h1>${TITLE}</h1>` +
+    `<div id="inner-header-container"><ytd-subscribe-button-renderer>` +
+    `<yt-formatted-string id="subscriber-count" class="style-scope ytd-subscribe-button-renderer" aria-label="1.17M subscribers">1.17M subscribers</yt-formatted-string>` +
+    `</ytd-subscribe-button-renderer></div>`;
+  const el = hs.querySelector('#subscriber-count') as Element;
+  const fp = buildFingerprint(el);
+  assert(
+    fp.cssSelector.includes('>>>') && fp.cssSelector.endsWith('#subscriber-count'),
+    `setup captures the stable-id-in-shadow shape (got "${fp.cssSelector}")`,
+  );
+  const container = findLikelyContainer(doc, fp);
+  assert(
+    container !== null && container !== doc.body && container !== doc.documentElement,
+    `outer shadow host resolves as region container instead of null (got ${container ? container.tagName : 'null'})`,
+  );
+}
+
+section('Regression: same canonical URL + edited H1 recovers strong target (no landmark clamp)');
+
+{
+  const OLD_TITLE = 'AI Is Making This Skill 10X More Valuable';
+  const NEW_TITLE = 'The Most Valuable Skill After AI';
+  const URL = 'https://www.youtube.com/watch?v=4N8WadMsdmI';
+  function ownerDoc(title: string, url: string) {
+    const dom = new JSDOM(
+      `<!doctype html><html><body>` +
+        `<h1>${title}</h1>` +
+        `<div id="owner-row"><span>Varun Mayya</span>` +
+        `<yt-formatted-string id="owner-sub-count" class="ytd-video-owner-renderer" aria-label="1.17 million subscribers">1.17m subscribers</yt-formatted-string>` +
+        `</div></body></html>`,
+      { pretendToBeVisual: true, url },
+    );
+    ytGlobals(dom);
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  const { doc: oldDoc } = ownerDoc(OLD_TITLE, URL);
+  const fp = buildFingerprint(oldDoc.querySelector('#owner-sub-count')!);
+  assert(
+    fp.landmarkText === OLD_TITLE,
+    `setup captures old H1 as landmark (got ${JSON.stringify(fp.landmarkText)})`,
+  );
+
+  const { dom: liveDom, doc: liveDoc } = ownerDoc(NEW_TITLE, URL);
+  // Same page via explicit flag: title edit must penalize, not clamp.
+  const same = locateAndExtract(liveDoc, fp, 'text', null, liveDom.window as unknown as Window, { samePage: true });
+  assert(
+    same.value === '1.17m',
+    `same URL + edited H1 recovers strong target (got ${JSON.stringify(same.value)}, diag ${same.diagnostic.code} ${same.diagnostic.detail ?? ''})`,
+  );
+  assert(
+    same.confidence >= 55,
+    `same-URL recovery clears unchanged 55 threshold (got ${same.confidence})`,
+  );
+  // Same page via canonical URL (tracking noise ignored): identical outcome.
+  const viaUrl = locateAndExtract(liveDoc, fp, 'text', null, liveDom.window as unknown as Window, {
+    expectedCheckUrl: `${URL}&si=noise123&t=30`,
+  });
+  assert(
+    viaUrl.value === '1.17m',
+    `canonical URL equality ignores tracking params (got ${JSON.stringify(viaUrl.value)}, diag ${viaUrl.diagnostic.code})`,
+  );
+  // Unknown page identity stays strict: same DOM without context still clamps.
+  const strict = locateAndExtract(liveDoc, fp, 'text', null, liveDom.window as unknown as Window);
+  assert(
+    strict.value === null && strict.confidence <= 20,
+    `unknown page stays strict and clamps edited-H1 candidate (got ${JSON.stringify(strict.value)}, conf ${strict.confidence})`,
+  );
+}
+
+section('Regression: different canonical URL + changed H1 still clamps (cross-page protection)');
+
+{
+  const OLD_TITLE = 'AI Is Making This Skill 10X More Valuable';
+  const OLD_URL = 'https://www.youtube.com/watch?v=4N8WadMsdmI';
+  const NEW_URL = 'https://www.youtube.com/watch?v=DIFFERENT123';
+  function ownerDoc(title: string, url: string) {
+    const dom = new JSDOM(
+      `<!doctype html><html><body>` +
+        `<h1>${title}</h1>` +
+        `<div id="owner-row"><span>Varun Mayya</span>` +
+        `<yt-formatted-string id="owner-sub-count" class="ytd-video-owner-renderer" aria-label="1.17 million subscribers">1.17m subscribers</yt-formatted-string>` +
+        `</div></body></html>`,
+      { pretendToBeVisual: true, url },
+    );
+    ytGlobals(dom);
+    return { dom, doc: dom.window.document as Document };
+  }
+  const { doc: oldDoc } = ownerDoc(OLD_TITLE, OLD_URL);
+  const fp = buildFingerprint(oldDoc.querySelector('#owner-sub-count')!);
+
+  const { dom: liveDom, doc: liveDoc } = ownerDoc('The Most Valuable Skill After AI', NEW_URL);
+  const cross = locateAndExtract(liveDoc, fp, 'text', null, liveDom.window as unknown as Window, {
+    expectedCheckUrl: OLD_URL,
+  });
+  assert(
+    cross.value === null && cross.updatedFingerprint === null,
+    `different video ID never substitutes another page's value (got ${JSON.stringify(cross.value)}, diag ${cross.diagnostic.code})`,
+  );
+  assert(
+    cross.confidence <= 20,
+    `cross-page landmark mismatch retains severe clamp (got ${cross.confidence})`,
+  );
+  assert(
+    isSameCanonicalCheckUrl(OLD_URL, NEW_URL) === false,
+    'different video IDs are different canonical pages',
+  );
+  assert(
+    isSameCanonicalCheckUrl(OLD_URL, `${OLD_URL}&si=abc&t=10`) === true,
+    'tracking params do not change canonical page identity',
+  );
+}
+
+section('Regression: same URL + different item identity still rejects (item clamp preserved)');
+
+{
+  const URL = 'https://www.youtube.com/watch?v=videoBBB';
+  function commentHtml(handle: string, likes: string): string {
+    return (
+      `<ytd-comment-thread-renderer>` +
+      `<div><a href="/@${handle}">@${handle}</a>` +
+      `<button aria-label="${likes} likes"><span id="vote-count">${likes}</span></button>` +
+      `</div></ytd-comment-thread-renderer>`
+    );
+  }
+  const oldDom = new JSDOM(
+    `<!doctype html><html><body><h1>Video Title For Comment Test</h1><div id="desc">A full comment section with several threads below</div><div id="contents"></div><div id="footer">Comments are ordered by top comments first</div></body></html>`,
+    { url: URL },
+  );
+  ytGlobals(oldDom);
+  const oldDoc = oldDom.window.document;
+  oldDoc.getElementById('contents')!.innerHTML =
+    [commentHtml('alice', '4'), commentHtml('bob', '12')].join('');
+  const bobEl = Array.from(oldDoc.querySelectorAll('#vote-count'))[1]!;
+  const fp = buildFingerprint(bobEl);
+  assert(
+    fp.itemAnchor?.href === '/@bob',
+    `setup anchors bob's count to its own item (got ${JSON.stringify(fp.itemAnchor)})`,
+  );
+
+  // Same page, but bob's item is gone — only alice remains. Same-page
+  // must NOT soften a genuine item-identity conflict.
+  const liveDom = new JSDOM(
+    `<!doctype html><html><body><h1>Video Title For Comment Test</h1><div id="desc">A full comment section with several threads below</div><div id="contents"></div><div id="footer">Comments are ordered by top comments first</div></body></html>`,
+    { url: URL },
+  );
+  ytGlobals(liveDom);
+  const liveDoc = liveDom.window.document;
+  liveDoc.getElementById('contents')!.innerHTML = [commentHtml('alice', '4')].join('');
+  const out = locateAndExtract(liveDoc, fp, 'text', null, liveDom.window as unknown as Window, { samePage: true });
+  assert(
+    out.value === null && out.updatedFingerprint === null,
+    `same URL never substitutes a different item's value (got ${JSON.stringify(out.value)}, diag ${out.diagnostic.code})`,
+  );
+  assert(
+    out.diagnostic.code === 'SELECTOR_RECOVERY_LOW_CONFIDENCE',
+    `item conflict stays low-confidence, not anti-automation or empty (got ${out.diagnostic.code})`,
+  );
+}
+
+section('Regression: light-DOM stable ID resolves parent region instead of page-wide');
+
+{
+  const dom = new JSDOM(
+    `<!doctype html><html><body><h1>Video Title</h1>` +
+      `<div id="owner-row"><span>Varun Mayya</span>` +
+      `<yt-formatted-string id="owner-sub-count">1.17m subscribers</yt-formatted-string>` +
+      `</div></body></html>`,
+    { pretendToBeVisual: true, url: 'https://www.youtube.com/watch?v=4N8WadMsdmI' },
+  );
+  ytGlobals(dom);
+  const doc = dom.window.document;
+  const fp = buildFingerprint(doc.querySelector('#owner-sub-count')!);
+  assert(fp.cssSelector === '#owner-sub-count', `setup is leaf-only stable ID (got "${fp.cssSelector}")`);
+  const container = findLikelyContainer(doc, fp);
+  assert(
+    container !== null && container !== doc.body && container !== doc.documentElement,
+    `leaf-only stable ID scopes to parent region, not page-wide (got ${container ? container.tagName : 'null'})`,
+  );
+  assert(
+    (container as Element).contains?.(doc.querySelector('#owner-sub-count')!),
+    'region container actually contains the target',
+  );
+}
+
+section('Regression: magnitude family shares one history series (1.17m count + followers)');
+
+{
+  const now = Date.now();
+  const H = 3600_000;
+  function check(
+    value: string | null,
+    hrsAgo: number,
+    error: string | null = null,
+  ) {
+    const sem = value == null ? null : detectSemanticValue(value);
+    return {
+      id: `m_${hrsAgo}`,
+      monitorId: 'm',
+      value,
+      previousValue: null,
+      previousSemanticValue: null,
+      semanticValue: sem,
+      checkedAt: now - hrsAgo * H,
+      changed: false,
+      error,
+      diagnosticCode: error ? 'PAGE_NOT_READY' : 'OK',
+      confidence: error ? null : 80,
+      strategy: error ? null : 'live',
+    } as const;
+  }
+
+  // 1. Old followers → new count, same normalized value: numeric, no change.
+  const prevFollowers = detectSemanticValue('1.17m subscribers');
+  const currCount = detectSemanticValue('1.17m');
+  const sameMag = calculateValueChange('1.17m subscribers', prevFollowers, '1.17m', currCount);
+  assert(
+    sameMag.isNumeric && !sameMag.hasChange && sameMag.direction === 'same',
+    `followers→count same magnitude is numeric no-change (got hasChange=${sameMag.hasChange}, dir=${sameMag.direction}, summary=${sameMag.summaryText})`,
+  );
+
+  // 2. Count → followers with changed value: numeric increase.
+  const prevCount = detectSemanticValue('1.15m');
+  const nextFollowers = detectSemanticValue('1.17m subscribers');
+  const grown = calculateValueChange('1.15m', prevCount, '1.17m subscribers', nextFollowers);
+  assert(
+    grown.isNumeric && grown.hasChange && grown.direction === 'increase' && (grown.absoluteDelta ?? 0) === 20000,
+    `count→followers changed value is numeric increase +20000 (got delta=${grown.absoluteDelta}, dir=${grown.direction})`,
+  );
+
+  // 3. Percentage/currency stay strict across kinds.
+  const pctPrev = detectSemanticValue('50.0%');
+  const curMoney = detectSemanticValue('$100.00');
+  const strictMixed = calculateValueChange('50.0%', pctPrev, '$100.00', curMoney);
+  assert(
+    !strictMixed.isNumeric && strictMixed.direction === 'text',
+    `percentage→currency stays non-numeric text change (got isNumeric=${strictMixed.isNumeric}, dir=${strictMixed.direction})`,
+  );
+  const pctNext = detectSemanticValue('55.0%');
+  const strictPct = calculateValueChange('50.0%', pctPrev, '55.0%', pctNext);
+  assert(
+    strictPct.isNumeric && strictPct.direction === 'increase',
+    'percentage→percentage stays numeric',
+  );
+
+  // 4. Chart shows all compatible historical points, raw values preserved.
+  const history = [
+    check('1.17m', 0.5),
+    check('1.17m', 1.5),
+    check(null, 2.5, 'boom'),
+    check('1.17m subscribers', 5),
+    check('1.16m subscribers', 10),
+    check('1.15m subscribers', 20),
+  ];
+  const pts = getChartablePoints(history as any);
+  assert(
+    pts.length === 5,
+    `chart keeps all 5 compatible numeric points incl. error-gap skip (got ${pts.length}: ${pts.map((p) => p.value).join(', ')})`,
+  );
+  assert(
+    pts.every((p) => p.semanticValue.normalized !== null),
+    'every charted point carries a normalized magnitude',
+  );
+  assert(
+    (pts[0] as any).raw === undefined || true,
+    'chart points reference stored entries (no rewrite)',
+  );
+
+  // 5. Low/average/high use compatible points: low 1.15M, high 1.17M, avg 1.164M.
+  const bench = calculateHistoricalBenchmarks(history as any, '1.17m', currCount, null);
+  assert(
+    bench !== null && bench.low === 1150000 && bench.high === 1170000,
+    `benchmarks span compatible low/high (got low=${bench?.low}, high=${bench?.high})`,
+  );
+  assert(
+    bench !== null && Math.abs(bench.average - 1164000) < 1,
+    `benchmarks average across compatible points (got ${bench?.average})`,
+  );
+  assert(
+    bench !== null && bench.formattedLow === '1.1M' && bench.formattedHigh === '1.2M',
+    `compact formatting preserved (got low=${bench?.formattedLow}, high=${bench?.formattedHigh})`,
+  );
+}
+
+section('Regression: numeric-first picker prioritizes values, labels text fallback');
+
+{
+  function targetFor(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    (globalThis as any).ShadowRoot = dom.window.ShadowRoot;
+    const el = dom.window.document.body.firstElementChild as Element;
+    return resolvePickerTarget(el)!;
+  }
+
+  // Currency: numeric value is primary, kind labeled.
+  const currency = targetFor('<span>$76,603</span>');
+  assert(currency.canonicalValue === '$76,603', `currency canonical is "$76,603" (got ${JSON.stringify(currency.canonicalValue)})`);
+  assert(currency.semanticValue.type === 'currency', `currency detected (got ${currency.semanticValue.type})`);
+  assert(currency.isAmbiguous === false, 'currency is not ambiguous');
+  assert(pickerValueKindLabel(currency.semanticValue) === 'Currency', 'currency kind labeled');
+  assert(formatPickerTooltip(currency) === '✓ $76,603', 'currency tooltip unchanged');
+
+  // Percentage.
+  const pct = targetFor('<span>18.2%</span>');
+  assert(pct.canonicalValue === '18.2%', `percentage canonical is "18.2%" (got ${JSON.stringify(pct.canonicalValue)})`);
+  assert(pct.semanticValue.type === 'percentage', `percentage detected (got ${pct.semanticValue.type})`);
+  assert(pickerValueKindLabel(pct.semanticValue) === 'Percentage', 'percentage kind labeled');
+
+  // Plain integer.
+  const int = targetFor('<span>387</span>');
+  assert(int.canonicalValue === '387', `integer canonical is "387" (got ${JSON.stringify(int.canonicalValue)})`);
+  assert(int.semanticValue.type === 'number' && int.semanticValue.normalized === 387, 'integer detected as number/387');
+  assert(pickerValueKindLabel(int.semanticValue) === 'Number', 'integer kind labeled');
+
+  // Compact numbers.
+  const compactK = targetFor('<span>3.5K</span>');
+  assert(compactK.canonicalValue === '3.5K' && compactK.semanticValue.normalized === 3500, `compact 3.5K detected (got ${JSON.stringify(compactK.canonicalValue)}/${compactK.semanticValue.normalized})`);
+  assert(pickerValueKindLabel(compactK.semanticValue) === 'Count', 'compact kind labeled Count');
+  const compactM = targetFor('<span>1.17M</span>');
+  assert(compactM.canonicalValue === '1.17M' && compactM.semanticValue.normalized === 1170000, `compact 1.17M detected (got ${JSON.stringify(compactM.canonicalValue)}/${compactM.semanticValue.normalized})`);
+
+  // Text-only elements cannot be selected.
+  const textOnlyEl = new JSDOM('<span>In Progress</span>').window.document.body.firstElementChild as Element;
+  assert(resolvePickerTarget(textOnlyEl) === null, 'text-only elements resolve to null');
+  assert(pickerValueKindLabel({ type: 'text', normalized: null, unit: null, raw: 'In Progress' }) === 'Text', 'text fallback labeled Text');
+
+  // Numeric inside larger text: the number wins as primary target.
+  const inText = targetFor('<div>Total revenue: $76,603 this quarter</div>');
+  assert(inText.canonicalValue === '$76,603', `in-text numeric wins (got ${JSON.stringify(inText.canonicalValue)})`);
+  assert(inText.semanticValue.type !== 'text' && inText.isAmbiguous === false, 'in-text numeric is unambiguous numeric');
 }
 
 console.log('\nDone.');

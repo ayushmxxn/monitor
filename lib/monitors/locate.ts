@@ -1,6 +1,7 @@
 import { locateElementWithRanking, rankRecoveryCandidates, buildFingerprint, buildReanchorFingerprint, normalizeText, isEffectivelyEmpty, isVisuallyHidden, extractVisibleText, type ElementFingerprint, type TextAnchor } from './fingerprint';
 import { detectAntiAutomation, detectAuthWall } from './antiAutomation';
 import { diagnostic, STALE_IDENTITY_CODES, type Diagnostic, type DiagnosticCode } from './diagnostics';
+import { isSameCanonicalCheckUrl } from './itemUrl';
 import { withExponentialBackoff, sleep, type ReadinessResult } from './readiness';
 import { detectSemanticValue, extractNumericToken, isCompatibleSemanticKind, CURRENCY_SYMBOLS, CURRENCY_CODES, type SemanticValue, type SemanticValueType } from './semanticValue';
 
@@ -25,6 +26,38 @@ const HIGH_CONFIDENCE = 80;
 const ACCEPT_THRESHOLD = 55;
 
 /**
+ * Page-identity context for landmark scoping (generic, no site logic).
+ * `samePage=true` means the live document is the same canonical page
+ * the monitor checks (a title edit — penalize landmark mismatch, don't
+ * clamp). Absent/false means unknown or different page (an SPA
+ * navigation — keep the severe clamp). `expectedCheckUrl` lets the
+ * locate layer compute this itself from the live document URL so a
+ * mid-check SPA navigation is judged at read time, not from a stale
+ * snapshot taken before injection.
+ */
+export interface LocatePageContext {
+  samePage?: boolean;
+  expectedCheckUrl?: string | null;
+}
+
+export function resolveSamePage(
+  doc: Document,
+  pageContext?: LocatePageContext | null,
+): boolean | undefined {
+  if (!pageContext) return undefined;
+  if (pageContext.samePage !== undefined) return pageContext.samePage;
+  if (!pageContext.expectedCheckUrl) return undefined;
+  try {
+    const liveUrl =
+      doc.baseURI || (doc as Document & { URL?: string }).URL || null;
+    if (!liveUrl) return undefined;
+    return isSameCanonicalCheckUrl(pageContext.expectedCheckUrl, liveUrl);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * The single source of truth for "given a fingerprint and a document,
  * what's the current value?" Used by both the live-tab content script
  * (which has a real `Window` for fingerprint capture on relocation) and
@@ -38,6 +71,7 @@ export function locateAndExtract(
   extractMode: 'text' | 'attribute',
   attributeName: string | null,
   win?: Window,
+  pageContext?: LocatePageContext | null,
 ): LocateAndExtractResult {
   // Single scan: one gather+score pass yields both the locate verdict
   // and the ranked fallback list, so a recovery read never pays for
@@ -46,9 +80,11 @@ export function locateAndExtract(
   // scan so the empty-candidate guard judges emptiness on the value
   // source actually being read, not just rendered text.
   const scanAttributeName = extractMode === 'attribute' ? attributeName : null;
+  const samePage = resolveSamePage(doc, pageContext);
   const { locate: result, ranked } = locateElementWithRanking(fp, doc, {
     acceptThreshold: ACCEPT_THRESHOLD,
     attributeName: scanAttributeName,
+    samePage,
   });
 
   if (!result.element) {
@@ -158,7 +194,7 @@ export function locateAndExtract(
   // resolves yet the value has moved on. Fall back to the same bounded
   // ranked recovery instead; on total failure the honest exact
   // diagnostic is preserved (never healed, last value kept).
-  const recovered = attemptFastPathFallback(doc, fp, result.element, extractMode, attributeName, win);
+  const recovered = attemptFastPathFallback(doc, fp, result.element, extractMode, attributeName, win, pageContext);
   return recovered ?? exact;
 }
 
@@ -210,8 +246,9 @@ export function locateAndExtractWithReanchor(
   attributeName: string | null,
   win: Window | undefined,
   reanchorLastValue: string | null | undefined,
+  pageContext?: LocatePageContext | null,
 ): LocateAndExtractResult {
-  const primary = locateAndExtract(doc, fp, extractMode, attributeName, win);
+  const primary = locateAndExtract(doc, fp, extractMode, attributeName, win, pageContext);
   if (primary.value !== null) return primary;
   if (!STALE_IDENTITY_CODES.has(primary.diagnostic.code as DiagnosticCode)) return primary;
   if (!reanchorLastValue || isEffectivelyEmpty(reanchorLastValue) || isPlaceholderValue(reanchorLastValue)) {
@@ -220,7 +257,7 @@ export function locateAndExtractWithReanchor(
   if (isValueConsistent(fp, reanchorLastValue)) return primary;
   const derived = buildReanchorFingerprint(fp, reanchorLastValue);
   if (!derived) return primary;
-  const attempt = locateAndExtract(doc, derived, extractMode, attributeName, win);
+  const attempt = locateAndExtract(doc, derived, extractMode, attributeName, win, pageContext);
   if (attempt.value === null) return primary;
   const baseDetail =
     attempt.diagnostic.detail ?? `relocated with ${attempt.confidence}/100 confidence via ${attempt.method}`;
@@ -249,6 +286,7 @@ function attemptFastPathFallback(
   extractMode: 'text' | 'attribute',
   attributeName: string | null,
   win: Window | undefined,
+  pageContext?: LocatePageContext | null,
 ): LocateAndExtractResult | null {
   // The exact selector resolved and scored well, but the slot holds no
   // usable value (empty skeleton, or a frame-echo rejection): rather
@@ -258,9 +296,11 @@ function attemptFastPathFallback(
   // they are strictly *more* demanding than the exact read that just
   // failed). One extra scan, only on this failure path: the happy path
   // still costs a single scan, so Check Now stays fast.
+  const samePage = resolveSamePage(doc, pageContext);
   const fallback = rankRecoveryCandidates(fp, doc, {
     acceptThreshold: ACCEPT_THRESHOLD,
     attributeName: extractMode === 'attribute' ? attributeName : null,
+    samePage,
   });
   for (const cand of fallback.ranked) {
     if (cand.element === exactElement) continue; // already read above

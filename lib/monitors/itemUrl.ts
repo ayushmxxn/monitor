@@ -94,6 +94,48 @@ export function resolveSourceUrl(
 }
 
 /**
+ * Generic canonical page identity: same origin + same path + same
+ * non-tracking query params (see `TRACKING_QUERY_PARAMS`), ignoring
+ * hash. Deliberately site-agnostic: sites that put the content id in
+ * the query (e.g. `/watch?v=…`) keep it because `v` is not a tracking
+ * param, while `si`/`t`/UTM noise is ignored either way.
+ *
+ * Used only to decide whether a landmark (heading) change happened on
+ * the *same* page (a title edit — penalize, don't clamp) versus a
+ * *different* page (an SPA navigation — keep the severe clamp).
+ * Unparseable input returns `false` (strict) so a bad URL never
+ * silently disables cross-page protection.
+ */
+export function isSameCanonicalCheckUrl(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  let ua: URL;
+  let ub: URL;
+  try {
+    ua = new URL(a);
+  } catch {
+    return false;
+  }
+  try {
+    ub = new URL(b);
+  } catch {
+    return false;
+  }
+  if (ua.origin !== ub.origin) return false;
+  if (ua.pathname !== ub.pathname) return false;
+  const pa = new URLSearchParams(ua.search);
+  const pb = new URLSearchParams(ub.search);
+  for (const key of Array.from(pa.keys())) {
+    if (TRACKING_QUERY_PARAMS.has(key.toLowerCase())) pa.delete(key);
+  }
+  for (const key of Array.from(pb.keys())) {
+    if (TRACKING_QUERY_PARAMS.has(key.toLowerCase())) pb.delete(key);
+  }
+  pa.sort();
+  pb.sort();
+  return pa.toString() === pb.toString();
+}
+
+/**
  * Removes only the query parameters known to be cross-site tracking/
  * session noise (see `TRACKING_QUERY_PARAMS` - the same list
  * `permalinkIdentity` uses to compare two permalinks for equality),

@@ -21,6 +21,7 @@ import type { HistoricalStats, Monitor, MonitorCheckStrategy } from './types';
 import { normalizeText } from './fingerprint';
 import type { SemanticValue } from './semanticValue';
 import { shouldTriggerAlert } from './alertCondition';
+import { playSparkleCue, playErrorCue } from './sound';
 
 /**
  * One in-flight run per monitor id. `checkMonitor` has three call sites
@@ -282,6 +283,7 @@ export async function recordSuccess(
   });
 
   if (changed) {
+    playSparkleCue();
     const shouldAlert = shouldTriggerAlert(
       current.alertCondition,
       value,
@@ -364,4 +366,11 @@ export async function recordFailure(
     confidence: null,
     strategy: null,
   });
+
+  const isNewFailure =
+    current.consecutiveFailures === 0 &&
+    (current.lastValue !== null || current.totalSuccessfulChecks > 0);
+  if (isNewFailure) {
+    playErrorCue();
+  }
 }

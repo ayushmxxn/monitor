@@ -7,6 +7,7 @@
  * contract itself is covered elsewhere), while the real Card/Detail
  * components, Result handling, and UI states are exercised.
  */
+import './mockBrowser';
 import { mock } from 'bun:test';
 import { JSDOM } from 'jsdom';
 import type { ReactElement } from 'react';
@@ -259,8 +260,8 @@ section('M5: detail check failure is visible; paused detail has no Check now');
   try {
     const { container, root } = await render(<MonitorDetail monitorId="m5-1" onDeleted={() => {}} />);
     assert(
-      container.textContent?.includes('Resume monitoring') === true,
-      'paused detail offers Resume monitoring as the path',
+      container.textContent?.includes('Resume') === true,
+      'paused detail offers Resume as the path',
     );
     const menuTrigger = container.querySelector('button[aria-label="More actions"]');
     assert(!!menuTrigger, 'overflow menu trigger exists');

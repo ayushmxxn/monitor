@@ -1,4 +1,5 @@
 import type { SemanticValueType } from "@/lib/monitors/semanticValue";
+import { isCompatibleSemanticKind } from "@/lib/monitors/semanticValue";
 import type { MonitorCheck } from "@/lib/monitors/types";
 import { playSound } from "@/lib/ui/sound";
 import { cn } from "@/lib/utils";
@@ -303,7 +304,10 @@ export function getChartablePoints(history: MonitorCheck[]): NumericCheck[] {
   if (numeric.length === 0) return [];
   const referenceType: SemanticValueType =
     numeric[numeric.length - 1].semanticValue.type;
-  return numeric.filter((entry) => entry.semanticValue.type === referenceType);
+  // Same magnitude family (count/followers/views) is one series across
+  // reclassifications of the same metric ("1.17m" then "1.17m
+  // subscribers"); every other kind stays strict.
+  return numeric.filter((entry) => isCompatibleSemanticKind(entry.semanticValue.type, referenceType));
 }
 
 /** Picks the narrowest range that still has at least two points to plot, defaulting to '30d' if sparse. */
@@ -628,7 +632,7 @@ export const HistoryChart = memo(function HistoryChart({
         <div
           role="group"
           aria-label="Time range"
-          className="inline-flex items-center gap-0.5 rounded-lg border border-black/[0.04] bg-muted/60 p-0.5 dark:border-white/[0.06]"
+          className="inline-flex items-center gap-0.5 rounded-lg bg-muted/60 p-0.5 dark:bg-secondary"
         >
           {RANGE_OPTIONS.map((opt) => (
             <button

@@ -22,6 +22,7 @@ onMessage('parseHtml', ({ data }): ParseHtmlResult => {
     data.attributeName,
     undefined,
     data.reanchorLastValue ?? null,
+    data.samePage !== undefined ? { samePage: data.samePage } : null,
   );
   return {
     value: result.value,

@@ -5,6 +5,7 @@ import {
   formatCompactNumber,
   formatStorageBytes,
   formatDurationSeconds,
+  isCompatibleSemanticKind,
 } from './semanticValue';
 import type { AlertCondition } from './types';
 
@@ -111,7 +112,7 @@ export function calculateValueChange(
   const areTypesCompatible =
     isPrevNumeric &&
     isCurrNumeric &&
-    previousSemantic.type === currentSemantic.type &&
+    isCompatibleSemanticKind(previousSemantic.type, currentSemantic.type) &&
     (previousSemantic.unit === currentSemantic.unit ||
       (!previousSemantic.unit && !currentSemantic.unit));
 

@@ -1,12 +1,13 @@
 /**
- * Real-browser regression test for font isolation.
+ * Real-browser regression test for typography, font isolation, and CSP immunity.
  *
- * Launches headless Chromium and verifies real computed styles of:
- * - The root monitor panel container
- * - Headers, text, and buttons
- * - Portaled dialogs (e.g. Delete / Clear all monitors dialogs)
+ * Launches headless Chromium and verifies:
+ * - Real computed styles (computed font-family)
+ * - Actual platform rendered fonts via Chrome DevTools Protocol (CSS.getPlatformFontsForNode)
+ * - Zero host-page layout disruption / document flow leakage
+ * - Immunity against strict host Content-Security-Policy (font-src 'self' https:)
  * across YouTube (Roboto, 10px root), ChatGPT (-apple-system-body),
- * and a static landing page.
+ * strict CSP pages, and a static landing page.
  */
 import { spawn, type ChildProcess } from 'child_process';
 import { readFileSync } from 'fs';
@@ -27,13 +28,16 @@ function assert(condition: boolean, message: string) {
   }
 }
 
-// Compile production globals.css
+// Compile production styles
 const rawCompiled = (
   await postcss(config.plugins).process(readFileSync('./styles/globals.css', 'utf8'), {
     from: './styles/globals.css',
   })
 ).css;
 const panelCss = rawCompiled.replaceAll(':root', ':host');
+
+// Official InterVariable.woff2 font as base64 for passing to headless Chromium test harness
+const fontBinaryBase64 = readFileSync('./public/fonts/InterVariable.woff2').toString('base64');
 
 const PORT = 9350;
 const chromeExecutable = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
@@ -53,7 +57,7 @@ try {
 
   // Wait for Chrome to bind port
   let connected = false;
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 25; i++) {
     await new Promise((r) => setTimeout(r, 200));
     try {
       const listRes = await fetch(`http://127.0.0.1:${PORT}/json/list`);
@@ -97,6 +101,10 @@ try {
     });
   }
 
+  await sendCdp('Page.enable');
+  await sendCdp('DOM.enable');
+  await sendCdp('CSS.enable');
+
   async function evaluateInBrowser<T>(fnString: string): Promise<T> {
     const res = await sendCdp<{ result: { value: T } }>('Runtime.evaluate', {
       expression: `(${fnString})()`,
@@ -112,6 +120,7 @@ try {
       bodyStyle: 'font-family: Roboto, Arial, sans-serif; font-size: 10px;',
       htmlStyle: 'font-size: 10px;',
       forbiddenFontSnippet: 'roboto',
+      strictCsp: false,
     },
     {
       name: 'ChatGPT',
@@ -119,18 +128,30 @@ try {
         'font-family: -apple-system-body, ui-sans-serif, -apple-system, "system-ui", "Segoe UI", Helvetica, Arial, sans-serif; font-size: 16px;',
       htmlStyle: 'font-size: 16px;',
       forbiddenFontSnippet: '-apple-system-body',
+      strictCsp: false,
+    },
+    {
+      name: 'Strict CSP page',
+      bodyStyle: 'font-family: Arial, sans-serif; font-size: 16px;',
+      htmlStyle: 'font-size: 16px;',
+      forbiddenFontSnippet: 'arial',
+      strictCsp: true,
     },
     {
       name: 'Static landing page',
       bodyStyle: 'font-family: system-ui, sans-serif; font-size: 16px;',
       htmlStyle: 'font-size: 16px;',
       forbiddenFontSnippet: 'times new roman',
+      strictCsp: false,
     },
   ];
 
-  section('Real-browser typography isolation & computed font verification');
+  section('Real-browser typography isolation & platform rendered font verification');
 
   for (const env of HOST_ENVIRONMENTS) {
+    await sendCdp('Page.navigate', { url: 'about:blank' });
+    await new Promise((r) => setTimeout(r, 100));
+
     const testResults = await evaluateInBrowser<{
       occupiesSpaceInFlow: boolean;
       panelFont: string;
@@ -138,7 +159,17 @@ try {
       textFont: string;
       buttonFont: string;
       dialogFont: string;
-    }>(`() => {
+      documentFontsReady: boolean;
+      interCheck16: boolean;
+    }>(`async () => {
+      // Apply strict font-src CSP meta tag if specified
+      if (${env.strictCsp}) {
+        const meta = document.createElement('meta');
+        meta.httpEquiv = 'Content-Security-Policy';
+        meta.content = "font-src 'self' https:;";
+        document.head.appendChild(meta);
+      }
+
       document.documentElement.style.cssText = ${JSON.stringify(env.htmlStyle)};
       document.body.style.cssText = ${JSON.stringify(env.bodyStyle)};
 
@@ -146,11 +177,26 @@ try {
       const bodyHeightBefore = document.body.offsetHeight;
 
       // Clean up any existing test elements
-      const existing = document.querySelector('monitor-panel');
-      if (existing) existing.remove();
+      document.querySelectorAll('monitor-panel').forEach(el => el.remove());
+
+      // Register Inter variable font using FontFace(ArrayBuffer) matching lib/ui/font.ts
+      const b64 = ${JSON.stringify(fontBinaryBase64)};
+      const binStr = atob(b64);
+      const bytes = new Uint8Array(binStr.length);
+      for (let i = 0; i < binStr.length; i++) {
+        bytes[i] = binStr.charCodeAt(i);
+      }
+      const font = new FontFace('Inter', bytes.buffer, {
+        style: 'normal',
+        weight: '100 900',
+        display: 'swap',
+      });
+      await font.load();
+      document.fonts.add(font);
 
       // Create host with applyShadowHostIsolation
       const host = document.createElement('monitor-panel');
+      host.id = 'monitor-panel-host';
       const hostStyle = host.style;
       hostStyle.setProperty('all', 'initial', 'important');
       hostStyle.setProperty('display', 'block', 'important');
@@ -181,16 +227,19 @@ try {
       panel.style.fontSize = '16px';
 
       const header = document.createElement('h1');
+      header.id = 'target-header';
       header.className = 'text-[13px] font-semibold tracking-tight';
       header.textContent = 'Monitor';
       panel.appendChild(header);
 
       const text = document.createElement('p');
+      text.id = 'target-text';
       text.className = 'text-[11px] text-muted-foreground';
       text.textContent = 'Track any element on this page.';
       panel.appendChild(text);
 
       const button = document.createElement('button');
+      button.id = 'target-button';
       button.className = 'inline-flex items-center justify-center rounded-md text-xs font-medium bg-primary text-primary-foreground h-8 px-3';
       button.textContent = 'New monitor';
       panel.appendChild(button);
@@ -201,6 +250,7 @@ try {
       const dialogCard = document.createElement('div');
       dialogCard.className = 'left-1/2 top-1/2 z-50 w-[calc(100%-2.5rem)] max-w-sm rounded-lg border bg-popover p-4 text-popover-foreground shadow-2xl font-sans';
       const dialogTitle = document.createElement('h2');
+      dialogTitle.id = 'target-dialog';
       dialogTitle.className = 'text-[13px] font-semibold';
       dialogTitle.textContent = 'Delete monitor?';
       dialogCard.appendChild(dialogTitle);
@@ -216,19 +266,20 @@ try {
         try { host.showPopover(); } catch(e) {}
       }
 
+      await document.fonts.ready;
+
       const bodyHeightAfter = document.body.offsetHeight;
 
-      const result = {
+      return {
         occupiesSpaceInFlow: bodyHeightBefore !== bodyHeightAfter,
         panelFont: getComputedStyle(panel).fontFamily,
         headerFont: getComputedStyle(header).fontFamily,
         textFont: getComputedStyle(text).fontFamily,
         buttonFont: getComputedStyle(button).fontFamily,
         dialogFont: getComputedStyle(dialogTitle).fontFamily,
+        documentFontsReady: document.fonts.status === 'loaded',
+        interCheck16: document.fonts.check('16px Inter'),
       };
-
-      host.remove();
-      return result;
     }`);
 
     // Assert host layout isolation (zero page footprint)
@@ -237,7 +288,7 @@ try {
       `${env.name}: shadow host has zero page footprint in document flow`,
     );
 
-    // Assert panel typography
+    // Assert panel computed typography
     assert(
       testResults.panelFont.toLowerCase().includes('inter'),
       `${env.name}: panel container computes to Inter design stack (got "${testResults.panelFont}")`,
@@ -268,6 +319,86 @@ try {
       !testResults.dialogFont.toLowerCase().includes(env.forbiddenFontSnippet),
       `${env.name}: dialog does not leak host font ("${env.forbiddenFontSnippet}")`,
     );
+
+    // Assert actual Rendered Platform Fonts via Chrome DevTools Protocol
+    const doc = await sendCdp<{ root: { nodeId: number } }>('DOM.getDocument', {
+      depth: -1,
+      pierce: true,
+    });
+
+    const hostRes = await sendCdp<{ nodeId: number }>('DOM.querySelector', {
+      nodeId: doc.root.nodeId,
+      selector: '#monitor-panel-host',
+    });
+
+    const desc = await sendCdp<{ node: any }>('DOM.describeNode', {
+      nodeId: hostRes.nodeId,
+      depth: -1,
+      pierce: true,
+    });
+
+    function findInNode(n: any, id: string): any {
+      if (n.attributes) {
+        for (let i = 0; i < n.attributes.length; i += 2) {
+          if (n.attributes[i] === 'id' && n.attributes[i + 1] === id) return n;
+        }
+      }
+      if (n.children) {
+        for (const c of n.children) {
+          const found = findInNode(c, id);
+          if (found) return found;
+        }
+      }
+      if (n.shadowRoots) {
+        for (const s of n.shadowRoots) {
+          const found = findInNode(s, id);
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+
+    async function getRenderedFont(elementId: string): Promise<string> {
+      const target = findInNode(desc.node, elementId);
+      if (!target?.backendNodeId) return '';
+      const pushRes = await sendCdp<{ nodeIds: number[] }>('DOM.pushNodesByBackendIdsToFrontend', {
+        backendNodeIds: [target.backendNodeId],
+      });
+      if (!pushRes.nodeIds?.[0]) return '';
+      const fontRes = await sendCdp<{
+        fonts: Array<{ familyName: string; isCustomFont: boolean }>;
+      }>('CSS.getPlatformFontsForNode', {
+        nodeId: pushRes.nodeIds[0],
+      });
+      return fontRes.fonts?.[0]?.familyName ?? '';
+    }
+
+    const headerPlatformFont = await getRenderedFont('target-header');
+    const textPlatformFont = await getRenderedFont('target-text');
+    const buttonPlatformFont = await getRenderedFont('target-button');
+    const dialogPlatformFont = await getRenderedFont('target-dialog');
+
+    assert(
+      headerPlatformFont === 'Inter Variable',
+      `${env.name}: header renders true Inter Variable (got "${headerPlatformFont}")`,
+    );
+    assert(
+      textPlatformFont === 'Inter Variable',
+      `${env.name}: text renders true Inter Variable (got "${textPlatformFont}")`,
+    );
+    assert(
+      buttonPlatformFont === 'Inter Variable',
+      `${env.name}: button renders true Inter Variable (got "${buttonPlatformFont}")`,
+    );
+    assert(
+      dialogPlatformFont === 'Inter Variable',
+      `${env.name}: dialog renders true Inter Variable (got "${dialogPlatformFont}")`,
+    );
+
+    // Clean up
+    await evaluateInBrowser(`() => {
+      document.querySelectorAll('monitor-panel').forEach(el => el.remove());
+    }`);
   }
 
   section('Real-browser tests completed successfully');

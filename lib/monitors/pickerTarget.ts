@@ -20,6 +20,7 @@ import { classifyTextPattern, findLabelText, normalizeText, isVisuallyHidden, ty
 import { extractVisibleText } from './locate';
 import {
   detectSemanticValue,
+  describeSemanticType,
   extractNumericToken,
   CURRENCY_SYMBOLS,
   CURRENCY_CODES,
@@ -131,23 +132,27 @@ export function resolvePickerTarget(start: Element): PickerTarget | null {
     const containerSemantic = detectSemanticValue(semanticContainer.text);
     const startSemantic = detectSemanticValue(startText);
     if (containerSemantic.type !== 'text' && (startSemantic.type === 'text' || startSemantic.type === 'number')) {
-      return toPickerTarget(semanticContainer.element, semanticContainer.text, null);
+      const containerTarget = toPickerTarget(semanticContainer.element, semanticContainer.text, null);
+      if (containerTarget) return containerTarget;
     }
   }
 
-  let best: { element: Element; text: string; score: number } | null = null;
+  let best: { element: Element; text: string; score: number; target: PickerTarget } | null = null;
 
   for (const { element, hops } of collectCandidates(effectiveStart)) {
     const text = extractVisibleText(element);
     if (!text || text.length > MAX_VALUE_LENGTH) continue;
 
+    const target = toPickerTarget(element, text, null);
+    if (!target) continue;
+
     const s = scoreCandidate(element, text, hops);
-    if (!best || s > best.score) best = { element, text, score: s };
+    if (!best || s > best.score) best = { element, text, score: s, target };
   }
 
   if (!best) return null;
 
-  return toPickerTarget(best.element, best.text, null);
+  return best.target;
 }
 
 /**
@@ -187,10 +192,12 @@ export function resolvePickerTargetAtPoint(doc: Document, x: number, y: number):
         const containerSemantic = detectSemanticValue(semanticContainer.text);
         const startSemantic = detectSemanticValue(text);
         if (containerSemantic.type !== 'text' && (startSemantic.type === 'text' || startSemantic.type === 'number')) {
-          return toPickerTarget(semanticContainer.element, semanticContainer.text, range, caretOffset);
+          const containerTarget = toPickerTarget(semanticContainer.element, semanticContainer.text, range, caretOffset);
+          if (containerTarget) return containerTarget;
         }
       }
-      return toPickerTarget(textNode.parentElement, text, range, caretOffset);
+      const directTarget = toPickerTarget(textNode.parentElement, text, range, caretOffset);
+      if (directTarget) return directTarget;
     }
   }
   return hit ? resolvePickerTarget(hit) : null;
@@ -520,7 +527,7 @@ function toPickerTarget(
   text: string,
   range: Range | null,
   caretOffset?: number | null,
-): PickerTarget {
+): PickerTarget | null {
   const full = normalizeText(element.textContent ?? '');
   const cursorOffset = getCursorOffsetInElement(element, range, caretOffset);
   const candidates = findNumericCandidates(text, cursorOffset);
@@ -534,16 +541,19 @@ function toPickerTarget(
   let plausibleCandidates: string[] = [];
 
   if (candidates.length === 0) {
-    canonicalValue = text;
+    if (fullSemantic.type === 'text' || fullSemantic.normalized === null) {
+      return null;
+    }
+    canonicalValue = extractNumericToken(text, fullSemantic) || text;
     semanticValue = fullSemantic;
     confidence = 'high';
     isAmbiguous = false;
   } else if (candidates.length === 1) {
     const single = candidates[0];
     canonicalValue = single.canonicalValue;
-    semanticValue = fullSemantic.type !== 'text'
+    semanticValue = fullSemantic.type !== 'text' && fullSemantic.normalized !== null
       ? fullSemantic
-      : (single.semanticValue.type !== 'text' ? single.semanticValue : detectSemanticValue(canonicalValue));
+      : (single.semanticValue.type !== 'text' && single.semanticValue.normalized !== null ? single.semanticValue : detectSemanticValue(canonicalValue));
     confidence = 'high';
     isAmbiguous = false;
     plausibleCandidates = [canonicalValue];
@@ -557,9 +567,9 @@ function toPickerTarget(
 
     if (scoreDiff >= 20) {
       canonicalValue = best.canonicalValue;
-      semanticValue = fullSemantic.type !== 'text' && (fullSemantic.type === best.semanticValue.type || best.semanticValue.type === 'number' || best.semanticValue.type === 'count')
+      semanticValue = fullSemantic.type !== 'text' && fullSemantic.normalized !== null && (fullSemantic.type === best.semanticValue.type || best.semanticValue.type === 'number' || best.semanticValue.type === 'count')
         ? fullSemantic
-        : (best.semanticValue.type !== 'text' ? best.semanticValue : detectSemanticValue(canonicalValue));
+        : (best.semanticValue.type !== 'text' && best.semanticValue.normalized !== null ? best.semanticValue : detectSemanticValue(canonicalValue));
       confidence = 'high';
       isAmbiguous = false;
     } else {
@@ -567,8 +577,12 @@ function toPickerTarget(
       isAmbiguous = true;
       ambiguityReason = `multiple values (${plausibleCandidates.slice(0, 2).join(' vs ')})`;
       canonicalValue = best.canonicalValue;
-      semanticValue = best.semanticValue.type !== 'text' ? best.semanticValue : fullSemantic;
+      semanticValue = best.semanticValue.type !== 'text' && best.semanticValue.normalized !== null ? best.semanticValue : (fullSemantic.type !== 'text' && fullSemantic.normalized !== null ? fullSemantic : detectSemanticValue(canonicalValue));
     }
+  }
+
+  if (!semanticValue || semanticValue.type === 'text' || semanticValue.normalized === null) {
+    return null;
   }
 
   const targetValue = canonicalValue && full.includes(canonicalValue) ? canonicalValue : text;
@@ -616,6 +630,21 @@ export function formatPickerTooltip(target: PickerTarget): string {
   const isNumeric = semantic.type !== 'text' && semantic.normalized !== null;
   const canonicalValue = target.canonicalValue ?? (isNumeric ? extractNumericToken(target.text, semantic) : target.text);
   return target.label ? `✓ ${target.label} · ${canonicalValue}` : `✓ ${canonicalValue}`;
+}
+
+/**
+ * Presentation-only kind label for picker tooltips (visual hierarchy,
+ * not monitoring logic): the detected value type for numeric targets
+ * ("Currency", "Percentage", "Count", "Number", …), or "Text" for
+ * text-only fallbacks so they never read as numeric monitors.
+ */
+export function pickerValueKindLabel(
+  semantic: SemanticValue | null | undefined,
+): string {
+  if (!semantic || semantic.type === 'text' || semantic.normalized === null) {
+    return 'Text';
+  }
+  return describeSemanticType(semantic.type);
 }
 
 function normalizeLabel(label: string | null): string | null {

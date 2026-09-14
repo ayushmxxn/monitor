@@ -14,8 +14,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SpinningCounter } from "@/components/ui/SpinningCounter";
-import { useIsChecking } from "@/hooks/useIsChecking";
 import { useCheckStage } from "@/hooks/useCheckStage";
+import { useIsChecking } from "@/hooks/useIsChecking";
 import { useMonitor } from "@/hooks/useMonitor";
 import { useMonitorHistory } from "@/hooks/useMonitorHistory";
 import { formatDateTime, formatRelativeTime } from "@/lib/format";
@@ -46,7 +46,7 @@ import {
   Play,
   Trash2,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DeleteMonitorDialog } from "./DeleteMonitorDialog";
 import {
   HistoryChart,
@@ -105,25 +105,49 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
 
   // Liquid highlight state for alert-condition dropdown
   const alertMenuRef = useRef<HTMLDivElement>(null);
-  const [alertHighlight, setAlertHighlight] = useState<{ top: number; height: number; opacity: number } | null>(null);
-  const handleAlertItemEnter = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
-    const container = alertMenuRef.current;
-    if (!container) return;
-    const cRect = container.getBoundingClientRect();
-    const iRect = e.currentTarget.getBoundingClientRect();
-    setAlertHighlight({ top: iRect.top - cRect.top, height: iRect.height, opacity: 1 });
-  }, []);
+  const [alertHighlight, setAlertHighlight] = useState<{
+    top: number;
+    height: number;
+    opacity: number;
+  } | null>(null);
+  const handleAlertItemEnter = useCallback(
+    (e: React.MouseEvent<HTMLButtonElement>) => {
+      const container = alertMenuRef.current;
+      if (!container) return;
+      const cRect = container.getBoundingClientRect();
+      const iRect = e.currentTarget.getBoundingClientRect();
+      setAlertHighlight({
+        top: iRect.top - cRect.top,
+        height: iRect.height,
+        opacity: 1,
+      });
+    },
+    [],
+  );
 
   // Liquid highlight state for more-actions menu
   const actionsMenuRef = useRef<HTMLDivElement>(null);
-  const [actionsHighlight, setActionsHighlight] = useState<{ top: number; height: number; opacity: number; isDestructive: boolean } | null>(null);
-  const handleActionsItemEnter = useCallback((e: React.MouseEvent<HTMLButtonElement>, isDestructive = false) => {
-    const container = actionsMenuRef.current;
-    if (!container) return;
-    const cRect = container.getBoundingClientRect();
-    const iRect = e.currentTarget.getBoundingClientRect();
-    setActionsHighlight({ top: iRect.top - cRect.top, height: iRect.height, opacity: 1, isDestructive });
-  }, []);
+  const [actionsHighlight, setActionsHighlight] = useState<{
+    top: number;
+    height: number;
+    opacity: number;
+    isDestructive: boolean;
+  } | null>(null);
+  const handleActionsItemEnter = useCallback(
+    (e: React.MouseEvent<HTMLButtonElement>, isDestructive = false) => {
+      const container = actionsMenuRef.current;
+      if (!container) return;
+      const cRect = container.getBoundingClientRect();
+      const iRect = e.currentTarget.getBoundingClientRect();
+      setActionsHighlight({
+        top: iRect.top - cRect.top,
+        height: iRect.height,
+        opacity: 1,
+        isDestructive,
+      });
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!isMenuOpen && !isAlertOpen) return;
@@ -611,7 +635,7 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
           history line integrated below rather than as a separate
           analytics block. */}
       {/* 1. Primary: current value + status + change + chart + 24H / 7D / 30D */}
-      <div className="rounded-lg border border-black/[0.05] dark:border-white/[0.08] bg-muted/40 p-3.5">
+      <div className="rounded-lg bg-muted/40 dark:bg-card p-3.5">
         <div className="flex h-9 items-center justify-between gap-2.5">
           <div className="flex h-9 min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
             <div
@@ -635,7 +659,10 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
               ) : isError ? (
                 (failureInfo?.label ?? "Check failed")
               ) : !hasValue && !isError ? (
-                <div className="flex items-center gap-2 h-8" aria-label="Loading initial value">
+                <div
+                  className="flex items-center gap-2 h-8"
+                  aria-label="Loading initial value"
+                >
                   <div className="h-7 w-24 rounded bg-muted-foreground/20 animate-pulse" />
                   <Loader2 className="h-4 w-4 animate-spin shrink-0 text-muted-foreground/60" />
                 </div>
@@ -656,7 +683,11 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
               </Badge>
             ) : (
               <MonitorStatusBadge
-                status={isCheckingActive || isNewMonitorLoading ? "checking" : monitor.lastStatus}
+                status={
+                  isCheckingActive || isNewMonitorLoading
+                    ? "checking"
+                    : monitor.lastStatus
+                }
                 diagnosticCode={monitor.lastDiagnosticCode}
                 lastError={monitor.lastError}
                 stageText={checkStageText}
@@ -826,7 +857,7 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
             ) : (
               <Play className="h-3.5 w-3.5" />
             )}
-            Resume monitoring
+            Resume
           </Button>
         )}
 
@@ -840,8 +871,9 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
             size="sm"
             variant="ghost"
             className={cn(
-              "h-8 w-full justify-between gap-1.5 border-0 bg-[#F1F1F2] px-2.5 text-xs font-normal text-muted-foreground shadow-none hover:bg-[#e8e8e9] hover:text-foreground dark:border dark:border-white/[0.06] dark:bg-muted dark:hover:bg-muted/80",
-              isAlertOpen && "bg-[#e8e8e9] text-foreground dark:bg-muted",
+              "h-8 w-full justify-between gap-1.5 border-0 bg-[#F1F1F2] px-2.5 text-xs font-normal text-muted-foreground shadow-none hover:bg-[#e8e8e9] hover:text-foreground dark:bg-secondary dark:hover:bg-accent dark:hover:text-foreground",
+              isAlertOpen &&
+                "bg-[#e8e8e9] text-foreground dark:bg-secondary dark:text-foreground",
             )}
             onClick={() => {
               setIsAlertOpen((prev) => !prev);
@@ -869,7 +901,9 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
               role="menu"
               aria-label="Alert condition options"
               ref={alertMenuRef}
-              onMouseLeave={() => setAlertHighlight(h => h ? { ...h, opacity: 0 } : null)}
+              onMouseLeave={() =>
+                setAlertHighlight((h) => (h ? { ...h, opacity: 0 } : null))
+              }
               className="absolute bottom-full left-0 z-50 mb-1 w-full min-w-[180px] rounded-md border border-border bg-popover p-1 shadow-md animate-enter-down"
             >
               {alertHighlight && (
@@ -884,7 +918,8 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
                     opacity: alertHighlight.opacity,
                     borderRadius: 6,
                     background: "hsl(var(--accent))",
-                    transition: "top 130ms cubic-bezier(0.4,0,0.2,1), height 130ms cubic-bezier(0.4,0,0.2,1), opacity 80ms ease",
+                    transition:
+                      "top 130ms cubic-bezier(0.4,0,0.2,1), height 130ms cubic-bezier(0.4,0,0.2,1), opacity 80ms ease",
                     pointerEvents: "none",
                     zIndex: 0,
                   }}
@@ -1028,8 +1063,9 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
             size="sm"
             variant="ghost"
             className={cn(
-              "h-8 w-8 border-0 bg-[#F1F1F2] p-0 text-muted-foreground shadow-none hover:bg-[#e8e8e9] hover:text-foreground dark:border dark:border-white/[0.06] dark:bg-muted dark:hover:bg-muted/80",
-              isMenuOpen && "bg-[#e8e8e9] text-foreground dark:bg-muted",
+              "h-8 w-8 border-0 bg-[#F1F1F2] p-0 text-muted-foreground shadow-none hover:bg-[#e8e8e9] hover:text-foreground dark:bg-secondary dark:hover:bg-accent dark:hover:text-foreground",
+              isMenuOpen &&
+                "bg-[#e8e8e9] text-foreground dark:bg-secondary dark:text-foreground",
             )}
             onClick={() => {
               setIsMenuOpen((prev) => !prev);
@@ -1048,7 +1084,9 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
               aria-orientation="vertical"
               aria-label="More actions"
               ref={actionsMenuRef}
-              onMouseLeave={() => setActionsHighlight(h => h ? { ...h, opacity: 0 } : null)}
+              onMouseLeave={() =>
+                setActionsHighlight((h) => (h ? { ...h, opacity: 0 } : null))
+              }
               className="absolute bottom-full right-0 z-50 mb-1 w-44 rounded-md border border-border bg-popover p-1 shadow-md animate-enter-down"
             >
               {actionsHighlight && (
@@ -1065,7 +1103,8 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
                     background: actionsHighlight.isDestructive
                       ? "hsl(var(--destructive) / 0.10)"
                       : "hsl(var(--accent))",
-                    transition: "top 130ms cubic-bezier(0.4,0,0.2,1), height 130ms cubic-bezier(0.4,0,0.2,1), opacity 80ms ease, background 100ms ease",
+                    transition:
+                      "top 130ms cubic-bezier(0.4,0,0.2,1), height 130ms cubic-bezier(0.4,0,0.2,1), opacity 80ms ease, background 100ms ease",
                     pointerEvents: "none",
                     zIndex: 0,
                   }}
@@ -1214,7 +1253,7 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
       />
 
       {/* 3. Monitor settings: Last checked + Checks every */}
-      <div className="rounded-lg border border-black/[0.04] bg-muted/30 px-6 py-2.5 dark:border-white/[0.05]">
+      <div className="rounded-lg bg-muted/30 dark:bg-card px-6 py-2.5">
         <div className="grid grid-cols-2 gap-4">
           <div className="flex min-w-0 flex-col gap-0.5">
             <span className="text-[11px] font-medium text-muted-foreground">
@@ -1284,7 +1323,7 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
 
       {/* 4. Statistics: All-time low + Average + All-time high */}
       {benchmarks && (
-        <div className="rounded-lg border border-black/[0.04] bg-muted/30 px-6 py-2.5 dark:border-white/[0.05]">
+        <div className="rounded-lg bg-muted/30 dark:bg-card px-6 py-2.5">
           <div className="grid grid-cols-3 gap-2">
             <div className="flex min-w-0 flex-col items-start gap-0.5 text-left">
               <span className="text-[11px] font-medium text-muted-foreground">
@@ -1401,7 +1440,7 @@ function RenameMonitorDialog({
 function DetailSkeleton() {
   return (
     <div className="flex flex-col gap-4">
-      <div className="rounded-lg border border-black/[0.05] bg-muted/40 p-3.5 dark:border-white/[0.08]">
+      <div className="rounded-lg bg-muted/40 dark:bg-card p-3.5">
         <div className="flex items-center justify-between gap-4">
           <Skeleton className="h-3.5 w-28" />
           <Skeleton className="h-5 w-20 rounded-full" />

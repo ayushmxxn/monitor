@@ -11,7 +11,6 @@ import {
   type LocateAndExtractResult,
 } from "@/lib/monitors/locate";
 import {
-  formatPickerTooltip,
   resolvePickerTargetAtPoint,
   type PickerTarget,
 } from "@/lib/monitors/pickerTarget";
@@ -44,6 +43,21 @@ export interface PageAgentLocateOptions {
    * pipeline runs exactly as before (new/healthy monitors).
    */
   reanchorLastValue?: string | null;
+  /**
+   * Canonical URL the check intended to load (see `resolveCheckUrl`).
+   * Compared per-read against the live document URL via generic
+   * canonical equality so a mid-check SPA navigation is judged at read
+   * time. When it matches, a heading change is a title edit (penalize,
+   * don't clamp); when it differs, the severe cross-page clamp stays.
+   */
+  expectedCheckUrl?: string | null;
+  /**
+   * Explicit same-page override (used by tests and by callers that
+   * already compared URLs, e.g. fetch/offscreen where the parsed
+   * document has no meaningful base URL). Takes precedence over
+   * `expectedCheckUrl` when present.
+   */
+  samePage?: boolean;
 }
 
 export interface PageAgentLocateResponse {
@@ -165,6 +179,10 @@ export async function runLocate(
       attributeName,
       window,
       options?.reanchorLastValue ?? null,
+      // Forwarded per-read so `locateAndExtract` compares the expected
+      // check URL against the *current* live document URL each attempt —
+      // a bounce that starts mid-check is judged at read time.
+      { samePage: options?.samePage, expectedCheckUrl: options?.expectedCheckUrl ?? null },
     );
     // Self-heal the working fingerprint across retries too, not just
     // on the final accepted result - otherwise a relocation found on
@@ -300,13 +318,23 @@ async function runPicker(): Promise<PickResult> {
     // colors are hard-coded here rather than shared via variables. Kept
     // in lockstep with the app's tokens so the on-page UI reads as the
     // same product as the panel, not a bolted-on tool.
-    const FONT = `-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,sans-serif`;
+    // Visual-only accent for the picker highlight + tooltip: #B8ADFC,
+    // restrained (DevTools-quiet): 1px outline, flat translucent fill,
+    // no glow, no shadow on the highlight; solid theme surface and a
+    // 1px subtle border on the tooltip.
+    const FONT = `Inter,-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif`;
     const FOREGROUND = isDark ? "#edf0f4" : "#171717";
     const MUTED_FOREGROUND = isDark ? "#a4acb8" : "#737373";
     const BORDER = isDark ? "rgba(255,255,255,0.13)" : "rgba(0,0,0,0.08)";
-    const SURFACE = isDark ? "rgba(35,38,43,0.92)" : "rgba(255,255,255,0.92)";
     const SURFACE_SOLID = isDark ? "#23262b" : "#ffffff";
     const MUTED_FILL = isDark ? "#30343a" : "#f5f5f5";
+    const ACCENT = "#B8ADFC";
+    const ACCENT_FILL_HOVER = "rgba(184,173,252,0.08)";
+    const ACCENT_FILL_AMBIGUOUS = "rgba(184,173,252,0.05)";
+    const ACCENT_FILL_SELECTED = "rgba(184,173,252,0.12)";
+    const ACCENT_INNER_HOVER = "rgba(184,173,252,0.25)";
+    const ACCENT_INNER_AMBIGUOUS = "rgba(184,173,252,0.15)";
+    const ACCENT_INNER_SELECTED = "rgba(184,173,252,0.35)";
     // A touch darker than MUTED_FILL, used only for the naming form's
     // "No, keep it" button hover - matches --accent in styles/globals.css.
     const ACCENT_FILL = isDark ? "#3b4047" : "#f0f0f0";
@@ -402,34 +430,36 @@ async function runPicker(): Promise<PickResult> {
     `;
     shadow.appendChild(styleTag);
 
-    // The highlight box traced around the hovered element. Rounded,
-    // softly shadowed rather than a hard line, so it reads as a gentle
-    // focus ring instead of a debugger's inspect overlay.
+    // The highlight box traced around the hovered element: precise,
+    // technical browser inspection overlay with a clean 1px boundary,
+    // subtle 8% translucent fill, crisp 1px inner highlight, and exact
+    // geometry matching the inspected element without fake radius or lag.
     const overlay = document.createElement("div");
     overlay.style.cssText =
-      "position:fixed;pointer-events:none;z-index:2147483647;" +
-      `border:2px solid ${FOREGROUND};background:rgba(23,23,23,0.045);` +
-      "box-shadow:0 0 0 4px rgba(23,23,23,0.045);" +
-      "border-radius:6px;display:none;" +
-      "transition:top 100ms cubic-bezier(0.22,1,0.36,1),left 100ms cubic-bezier(0.22,1,0.36,1)," +
-      "width 100ms cubic-bezier(0.22,1,0.36,1),height 100ms cubic-bezier(0.22,1,0.36,1)," +
-      "border-color 120ms ease-out,background-color 120ms ease-out;";
+      "position:fixed;pointer-events:none;z-index:2147483647;box-sizing:border-box;" +
+      `border:1px solid ${ACCENT};background:${ACCENT_FILL_HOVER};` +
+      `box-shadow:inset 0 0 0 1px ${ACCENT_INNER_HOVER};` +
+      "border-radius:0px;display:none;";
     shadow.appendChild(overlay);
 
-    // The cursor-following hint. Frosted white to match the panel's own
-    // surface (bg-background + its shadow recipe) instead of the flat
-    // black chip this used to be - the same material reused at a
-    // smaller size, not a separate visual language.
+    // The cursor-following hint (visual only - content still comes from
+    // `formatPickerTooltip`, rendered here with value-dominant
+    // hierarchy: strong value, muted label). Compact rectangular card:
+    // solid theme surface, 1px subtle border, 6px radius, small soft
+    // shadow for separation only. No glow, no glass, no gradient.
+    // Position is clamped to the viewport every mousemove (one
+    // layout read) so it never runs off-screen or sits on top of the
+    // selected element when another corner has room.
     const tooltip = document.createElement("div");
     tooltip.style.cssText =
       "position:fixed;pointer-events:none;z-index:2147483647;" +
-      `background:${SURFACE};backdrop-filter:blur(20px) saturate(180%);-webkit-backdrop-filter:blur(20px) saturate(180%);` +
-      `border:0.5px solid ${BORDER};` +
-      `color:${FOREGROUND};font:500 12px/1.5 ${FONT};` +
-      "padding:5px 10px;border-radius:8px;display:none;" +
-      "max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" +
-      "box-shadow:0 12px 28px -6px rgba(0,0,0,0.18),0 2px 6px rgba(0,0,0,0.06);" +
-      "transition:opacity 100ms ease-out;";
+      `background:${SURFACE_SOLID};` +
+      `border:1px solid ${BORDER};` +
+      `color:${FOREGROUND};font:400 12px/1.45 ${FONT};` +
+      "padding:5px 8px;border-radius:6px;display:none;" +
+      "max-width:260px;" +
+      "box-shadow:0 2px 8px rgba(0,0,0,0.12);" +
+      "transition:opacity 90ms ease-out;";
     shadow.appendChild(tooltip);
 
     let currentTarget: PickerTarget | null = null;
@@ -477,17 +507,115 @@ async function runPicker(): Promise<PickResult> {
       host.remove();
     }
 
-    function positionTooltip(clientX: number, clientY: number): void {
-      // Offset below-right of the cursor; flipped to above-right once
-      // there's no room below, so it never runs off the viewport.
+    let lastMouse = { x: 0, y: 0 };
+    let lastTooltipKey: string | null = null;
+
+    function overlaps(
+      x: number,
+      y: number,
+      w: number,
+      h: number,
+      rect: { top: number; left: number; bottom: number; right: number } | null,
+    ): boolean {
+      if (!rect) return false;
+      const GAP = 6;
+      return !(
+        x + w + GAP < rect.left ||
+        x - GAP > rect.right ||
+        y + h + GAP < rect.top ||
+        y - GAP > rect.bottom
+      );
+    }
+
+    function positionTooltip(
+      clientX: number,
+      clientY: number,
+      targetRect: DOMRect | null,
+    ): void {
+      // Intelligent placement (visual only): try cursor-adjacent corners
+      // in order, first fit that stays on-screen and avoids covering the
+      // selected element wins; otherwise clamp below-right on-screen.
+      // Single layout read (offsetWidth/Height) per move keeps the
+      // cursor responsive.
+      const MARGIN = 8;
       const OFFSET = 14;
-      tooltip.style.left = `${Math.min(clientX + OFFSET, window.innerWidth - 260)}px`;
-      const spaceBelow = window.innerHeight - clientY;
-      if (spaceBelow < 60) {
-        tooltip.style.top = `${clientY - 34}px`;
-      } else {
-        tooltip.style.top = `${clientY + OFFSET}px`;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const tw = tooltip.offsetWidth || 280;
+      const th = tooltip.offsetHeight || 34;
+      const rect = targetRect
+        ? {
+            top: targetRect.top,
+            left: targetRect.left,
+            bottom: targetRect.bottom,
+            right: targetRect.right,
+          }
+        : null;
+      const candidates: Array<{ x: number; y: number }> = [
+        { x: clientX + OFFSET, y: clientY + OFFSET },
+        { x: clientX + OFFSET, y: clientY - th - OFFSET },
+        { x: clientX - tw - OFFSET, y: clientY + OFFSET },
+        { x: clientX - tw - OFFSET, y: clientY - th - OFFSET },
+        { x: (rect ? rect.right : clientX) + OFFSET, y: clientY - th / 2 },
+        { x: clientX - tw - OFFSET, y: clientY - th / 2 },
+      ];
+      for (const c of candidates) {
+        const x = Math.min(
+          Math.max(c.x, MARGIN),
+          Math.max(MARGIN, vw - tw - MARGIN),
+        );
+        const y = Math.min(
+          Math.max(c.y, MARGIN),
+          Math.max(MARGIN, vh - th - MARGIN),
+        );
+        if (!overlaps(x, y, tw, th, rect)) {
+          tooltip.style.left = `${x}px`;
+          tooltip.style.top = `${y}px`;
+          return;
+        }
       }
+      tooltip.style.left = `${Math.min(Math.max(clientX + OFFSET, MARGIN), Math.max(MARGIN, vw - tw - MARGIN))}px`;
+      tooltip.style.top = `${Math.min(Math.max(clientY + OFFSET, MARGIN), Math.max(MARGIN, vh - th - MARGIN))}px`;
+    }
+
+    function renderTooltipContent(target: PickerTarget): string {
+      const ambiguous = Boolean(target.isAmbiguous);
+      const key = `${ambiguous ? "a" : "v"}|${target.canonicalValue ?? ""}|${(target.candidates ?? []).join(",")}`;
+      if (key === lastTooltipKey) return key;
+      lastTooltipKey = key;
+      while (tooltip.firstChild) tooltip.removeChild(tooltip.firstChild);
+      const row = document.createElement("div");
+      row.style.cssText =
+        "display:flex;align-items:baseline;gap:6px;max-width:100%;";
+      const dot = document.createElement("span");
+      dot.textContent = ambiguous ? "⚠" : "✓";
+      dot.style.cssText =
+        `flex:none;font:600 11px/1.4 ${FONT};color:${ambiguous ? MUTED_FOREGROUND : ACCENT};`;
+      row.appendChild(dot);
+      const value = document.createElement("span");
+      value.textContent = ambiguous
+        ? "Ambiguous"
+        : (target.canonicalValue ?? "");
+      value.style.cssText =
+        `flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;` +
+        `font:600 12.5px/1.4 ${FONT};letter-spacing:-0.01em;color:${FOREGROUND};`;
+      row.appendChild(value);
+      tooltip.appendChild(row);
+      if (ambiguous) {
+        const detail =
+          target.candidates && target.candidates.length > 1
+            ? target.candidates.slice(0, 3).join(" vs ")
+            : (target.ambiguityReason ?? "multiple values");
+        if (detail) {
+          const meta = document.createElement("div");
+          meta.textContent = detail;
+          meta.style.cssText =
+            `margin:0 0 0 17px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;` +
+            `font:400 11px/1.4 ${FONT};color:${MUTED_FOREGROUND};`;
+          tooltip.appendChild(meta);
+        }
+      }
+      return key;
     }
 
     function showValid(target: PickerTarget): void {
@@ -495,11 +623,23 @@ async function runPicker(): Promise<PickResult> {
         target.range?.getBoundingClientRect() ??
         target.element.getBoundingClientRect();
       overlay.style.display = "block";
-      overlay.style.borderColor = FOREGROUND;
+      overlay.style.boxSizing = "border-box";
+      overlay.style.borderColor = ACCENT;
       overlay.style.borderStyle = target.isAmbiguous ? "dashed" : "solid";
       overlay.style.background = target.isAmbiguous
-        ? "rgba(23,23,23,0.02)"
-        : "rgba(23,23,23,0.045)";
+        ? ACCENT_FILL_AMBIGUOUS
+        : ACCENT_FILL_HOVER;
+      overlay.style.boxShadow = `inset 0 0 0 1px ${target.isAmbiguous ? ACCENT_INNER_AMBIGUOUS : ACCENT_INNER_HOVER}`;
+      if (target.range) {
+        overlay.style.borderRadius = "0px";
+      } else {
+        try {
+          const cs = window.getComputedStyle(target.element);
+          overlay.style.borderRadius = cs.borderRadius || "0px";
+        } catch {
+          overlay.style.borderRadius = "0px";
+        }
+      }
       overlay.style.top = `${rect.top}px`;
       overlay.style.left = `${rect.left}px`;
       overlay.style.width = `${rect.width}px`;
@@ -507,7 +647,8 @@ async function runPicker(): Promise<PickResult> {
 
       tooltip.style.display = "block";
       tooltip.style.color = FOREGROUND;
-      tooltip.textContent = formatPickerTooltip(target);
+      renderTooltipContent(target);
+      positionTooltip(lastMouse.x, lastMouse.y, rect);
       document.documentElement.style.cursor = target.isAmbiguous
         ? "help"
         : "crosshair";
@@ -519,12 +660,25 @@ async function runPicker(): Promise<PickResult> {
       overlay.style.display = "none";
       tooltip.style.display = "block";
       tooltip.style.color = MUTED_FOREGROUND;
-      tooltip.textContent = "✕ Not a readable value";
+      lastTooltipKey = "invalid";
+      while (tooltip.firstChild) tooltip.removeChild(tooltip.firstChild);
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:baseline;gap:7px;";
+      const mark = document.createElement("span");
+      mark.textContent = "✕";
+      mark.style.cssText = `flex:none;font:600 12px/1.4 ${FONT};color:${MUTED_FOREGROUND};`;
+      row.appendChild(mark);
+      const text = document.createElement("span");
+      text.textContent = "Not a readable value";
+      text.style.cssText = `font:400 12px/1.4 ${FONT};color:${MUTED_FOREGROUND};white-space:nowrap;`;
+      row.appendChild(text);
+      tooltip.appendChild(row);
+      positionTooltip(lastMouse.x, lastMouse.y, null);
       document.documentElement.style.cursor = "not-allowed";
     }
 
     function onMouseMove(event: MouseEvent): void {
-      positionTooltip(event.clientX, event.clientY);
+      lastMouse = { x: event.clientX, y: event.clientY };
 
       const resolved = resolvePickerTargetAtPoint(
         document,
@@ -543,6 +697,7 @@ async function runPicker(): Promise<PickResult> {
     function onClick(event: MouseEvent): void {
       event.preventDefault();
       event.stopPropagation();
+      lastMouse = { x: event.clientX, y: event.clientY };
       if (settled) return;
 
       // Not a readable value under the cursor right now - refuse the
@@ -614,9 +769,25 @@ async function runPicker(): Promise<PickResult> {
       fingerprint: ElementFingerprint,
     ): void {
       // Done hovering - only the (now-pinned) highlight remains behind
-      // the naming field.
+      // the naming field, restyled to the clearly-different selected
+      // state (visual only): stronger accent fill + ring so the pinned
+      // target never reads as just another hover.
       for (const off of teardownFns.splice(0)) off();
       tooltip.remove();
+      overlay.style.borderColor = ACCENT;
+      overlay.style.borderStyle = "solid";
+      overlay.style.background = ACCENT_FILL_SELECTED;
+      overlay.style.boxShadow = `inset 0 0 0 1px ${ACCENT_INNER_SELECTED}`;
+      if (resolved.range) {
+        overlay.style.borderRadius = "0px";
+      } else {
+        try {
+          const cs = window.getComputedStyle(resolved.element);
+          overlay.style.borderRadius = cs.borderRadius || "0px";
+        } catch {
+          overlay.style.borderRadius = "0px";
+        }
+      }
       document.documentElement.style.cursor = previousCursor;
 
       // Opaque white card - a small step up from the frosted, cursor-

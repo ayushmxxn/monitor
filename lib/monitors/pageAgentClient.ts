@@ -174,6 +174,7 @@ export async function locateOnTab(
   attributeName: string | null,
   maxTotalWaitMs: number,
   reanchorLastValue?: string | null,
+  pageIdentity?: { expectedCheckUrl?: string | null; samePage?: boolean },
 ): Promise<LiveLocateOutcome> {
   // Both the file injection and the follow-up `func` call are made
   // inside the *same* retry attempt — if a frame-replacement race hits
@@ -191,6 +192,8 @@ export async function locateOnTab(
         attrName: string | null,
         waitMs: number,
         reanchor: string | null,
+        expectedUrl: string | null,
+        samePageFlag: boolean | null,
       ) => {
         const win = window as unknown as {
           __monitorPageAgent?: {
@@ -213,6 +216,8 @@ export async function locateOnTab(
         return win.__monitorPageAgent.locate(fpJson, mode, attrName, {
           maxTotalWaitMs: waitMs,
           reanchorLastValue: reanchor,
+          expectedCheckUrl: expectedUrl,
+          samePage: samePageFlag ?? undefined,
         });
       },
       args: [
@@ -221,6 +226,8 @@ export async function locateOnTab(
         attributeName,
         maxTotalWaitMs,
         reanchorLastValue ?? null,
+        pageIdentity?.expectedCheckUrl ?? null,
+        pageIdentity?.samePage ?? null,
       ],
     });
     return injection;
