@@ -5,6 +5,7 @@ import { onMessage } from '@/lib/messaging';
 import { EXTENSION_INVALIDATED_EVENT } from '@/hooks/useExtensionInvalidated';
 import { ensureInterLoaded } from '@/lib/ui/font';
 import { play } from 'cuelume';
+import { settingsItem } from '@/lib/storage/items';
 // `?inline` bundles the compiled CSS as a plain string at build time
 // instead of relying on WXT's `cssInjectionMode: 'ui'`, which loads
 // styles with a runtime `fetch()` to the extension's own
@@ -183,8 +184,12 @@ export default defineContentScript({
       handle?.toggle();
       return { handled: true };
     });
-    const unregisterPlayCue = onMessage('playCue', ({ data }) => {
+    const unregisterPlayCue = onMessage('playCue', async ({ data }) => {
       try {
+        const settings = await settingsItem.getValue();
+        if (settings?.soundEnabled === false) {
+          return;
+        }
         play(data.cue, { volume: data.volume });
       } catch {
         // ignore audio errors

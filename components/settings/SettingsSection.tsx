@@ -15,11 +15,13 @@ interface SettingsSectionProps {
  */
 export function SettingsSection({ title, children, className }: SettingsSectionProps) {
   return (
-    <section className={className}>
-      <h2 className="mb-1.5 px-1 text-[11px] font-medium text-muted-foreground/75">
+    <section className={cn('flex flex-col gap-1.5', className)}>
+      <h2 className="px-0.5 text-[11.5px] font-medium text-muted-foreground/80 select-none">
         {title}
       </h2>
-      <div className="divide-y divide-border/70 rounded-lg border border-border/70">{children}</div>
+      <div className="divide-y divide-border/60 rounded-lg border border-border/70 bg-card/40 overflow-hidden">
+        {children}
+      </div>
     </section>
   );
 }

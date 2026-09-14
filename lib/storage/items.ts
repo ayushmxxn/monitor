@@ -88,14 +88,24 @@ function safeDefineItem<T>(
  * no-backend principle: data never leaves the device, even via Chrome's
  * own account sync.
  */
+export function migrateSettingsV6(stored: unknown): AppSettings {
+  const partial = (stored && typeof stored === 'object' ? stored : {}) as Partial<AppSettings>;
+  return {
+    ...DEFAULT_SETTINGS,
+    ...partial,
+    soundEnabled: typeof partial.soundEnabled === 'boolean' ? partial.soundEnabled : DEFAULT_SETTINGS.soundEnabled,
+  };
+}
+
 export const settingsItem = safeDefineItem<AppSettings>(STORAGE_KEYS.settings, {
   fallback: DEFAULT_SETTINGS,
-  version: 5,
+  version: 6,
   migrations: {
     2: (stored: unknown) => ({ ...DEFAULT_SETTINGS, ...(stored as Partial<AppSettings>) }),
     3: (stored: unknown) => ({ ...DEFAULT_SETTINGS, ...(stored as Partial<AppSettings>) }),
     4: (stored: unknown) => ({ ...DEFAULT_SETTINGS, ...(stored as Partial<AppSettings>) }),
     5: (stored: unknown) => ({ ...DEFAULT_SETTINGS, ...(stored as Partial<AppSettings>) }),
+    6: migrateSettingsV6,
   },
 });
 

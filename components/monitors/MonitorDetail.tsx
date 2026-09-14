@@ -81,7 +81,7 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
   const { monitor, isLoading } = useMonitor(monitorId);
   const { history } = useMonitorHistory(monitorId);
   const [isChecking, setIsChecking] = useState(false);
-  const isCheckingInFlight = useIsChecking(monitorId);
+  const isCheckingInFlight = useIsChecking(monitorId, monitor?.lastCheckedAt ?? null);
   const isCheckingActive = isChecking || isCheckingInFlight;
   const isNewMonitorLoading = Boolean(
     monitor && monitor.lastValue === null && monitor.lastStatus !== "error",
@@ -555,7 +555,10 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
     // keep raw url
   }
 
-  const isError = monitor.lastStatus === "error";
+  // Same suppression as the home card: while a check is in flight the
+  // stored error is stale, so the detail reads Checking (value kept)
+  // until the fresh result lands.
+  const isError = monitor.lastStatus === "error" && !isCheckingInFlight;
   const isTemporarilyBlocked =
     isError && isTemporaryPageState(monitor.lastDiagnosticCode);
   const failureInfo = isError
@@ -594,11 +597,10 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
       ? String(monitor.lastSemanticValue.normalized)
       : "Target";
   const baseValue = monitor?.lastValue ?? shownValue;
-  const valueLength = baseValue
-    ? baseValue.length
-    : isError
-      ? (failureInfo?.label?.length ?? 12)
-      : 1;
+  // Sizes the hero for the value itself: the hero only ever shows the
+  // reading (or its loading/empty placeholder), never status text, so
+  // the single error status lives in the header badge alone.
+  const valueLength = baseValue ? baseValue.length : 1;
   const valueFontSizeClass =
     valueLength > 13
       ? "text-[18px]"
@@ -656,9 +658,7 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
                   disabled={Boolean(scrub)}
                   lastCheckedAt={monitor.lastCheckedAt}
                 />
-              ) : isError ? (
-                (failureInfo?.label ?? "Check failed")
-              ) : !hasValue && !isError ? (
+              ) : isNewMonitorLoading ? (
                 <div
                   className="flex items-center gap-2 h-8"
                   aria-label="Loading initial value"
@@ -670,9 +670,6 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
                 "—"
               )}
             </div>
-            {isCheckingActive && shownValue && (
-              <Loader2 className="h-4 w-4 animate-spin shrink-0 text-muted-foreground/60" />
-            )}
           </div>
 
           <div className="shrink-0">
@@ -696,12 +693,12 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
           </div>
         </div>
 
-        {isNewMonitorLoading ? (
-          <p className="mt-1 flex items-center gap-1.5 truncate text-[12px] font-medium tabular-nums text-muted-foreground">
-            <Loader2 className="h-3 w-3 animate-spin shrink-0 text-muted-foreground/70" />
-            <span>{checkStageText}</span>
-          </p>
-        ) : hasChart ? (
+        {/* While checking, status lives in exactly two places by design:
+            the header badge above ("Checking…") and the primary Check now
+            button below (spinner, disabled against duplicate checks).
+            No extra spinners or stage lines here — one status, one
+            action, never the same state twice. */}
+        {isNewMonitorLoading ? null : hasChart ? (
           <p className="mt-1 truncate text-[12px] font-medium tabular-nums">
             {rangeMovement ? (
               <span
@@ -806,12 +803,6 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
             {formatDateTime(scrub.checkedAt)}
           </p>
         )}
-        {!hasChart && !heroMovement && !scrub && isCheckingActive && (
-          <p className="mt-1 flex items-center gap-1.5 truncate text-[12px] font-medium tabular-nums text-muted-foreground">
-            <Loader2 className="h-3 w-3 animate-spin shrink-0 text-muted-foreground/70" />
-            <span>{checkStageText}</span>
-          </p>
-        )}
 
         <div className="mt-4">
           <HistoryChart
@@ -826,7 +817,7 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
       {checkError && <InlineNotice tone="error">{checkError}</InlineNotice>}
       {actionError && <InlineNotice tone="error">{actionError}</InlineNotice>}
 
-      <div className="flex w-full items-center gap-2 px-6">
+      <div className="flex w-full items-center gap-2 px-3.5">
         {monitor.enabled ? (
           <Button
             size="sm"
@@ -1207,7 +1198,7 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
       )}
 
       {conditionType === "matches" && (
-        <div className="w-full px-6">
+        <div className="w-full px-3.5">
           <div className="relative w-full">
             <Input
               type="text"
@@ -1253,7 +1244,7 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
       />
 
       {/* 3. Monitor settings: Last checked + Checks every */}
-      <div className="rounded-lg bg-muted/30 dark:bg-card px-6 py-2.5">
+      <div className="rounded-lg bg-muted/30 dark:bg-card px-3.5 py-2.5">
         <div className="grid grid-cols-2 gap-4">
           <div className="flex min-w-0 flex-col gap-0.5">
             <span className="text-[11px] font-medium text-muted-foreground">
@@ -1290,40 +1281,38 @@ export function MonitorDetail({ monitorId, onDeleted }: MonitorDetailProps) {
         </div>
       </div>
 
-      {isError && (
-        <InlineNotice tone={isTemporarilyBlocked ? "warning" : "error"}>
-          <div className="flex flex-col gap-1">
-            <span className="font-medium">
-              {failureInfo?.description ?? monitor.lastError}
-            </span>
-            {monitor.lastError &&
-              monitor.lastError !== failureInfo?.description && (
-                <span className="text-[11.5px] text-muted-foreground">
-                  {monitor.lastError}
-                </span>
-              )}
-            {isTemporarilyBlocked && (
-              <span className="text-[11.5px] text-muted-foreground">
-                No value has been changed or recorded from this page — Monitor
-                will keep checking on its normal schedule and pick the real
-                value back up automatically once the site stops showing it.
+      {/* Compact error explanation: one muted block, not a card. The
+          error label already lives once in the header badge above, so
+          this carries only the human description, the temporary-block
+          note when relevant, and the preserved-value note when there is
+          one — never the stored technical trace, which stays in
+          storage/history for debugging. */}
+      {isError && failureInfo && (
+        <div role="status" className="px-3.5">
+          <p className="text-[12px] leading-relaxed text-muted-foreground">
+            {failureInfo.description}
+          </p>
+          {isTemporarilyBlocked && (
+            <p className="mt-1 text-[11.5px] leading-relaxed text-muted-foreground/80">
+              No value has been changed or recorded from this page — Monitor
+              will keep checking on its normal schedule and pick the real
+              value back up automatically once the site stops showing it.
+            </p>
+          )}
+          {hasValue && (
+            <p className="mt-1 text-[11.5px] text-muted-foreground/80">
+              Last known value preserved:{" "}
+              <span className="font-medium text-foreground">
+                {monitor.lastValue}
               </span>
-            )}
-            {hasValue && (
-              <span className="text-[11.5px] text-muted-foreground">
-                Last known value preserved:{" "}
-                <span className="font-medium text-foreground">
-                  {monitor.lastValue}
-                </span>
-              </span>
-            )}
-          </div>
-        </InlineNotice>
+            </p>
+          )}
+        </div>
       )}
 
       {/* 4. Statistics: All-time low + Average + All-time high */}
       {benchmarks && (
-        <div className="rounded-lg bg-muted/30 dark:bg-card px-6 py-2.5">
+        <div className="rounded-lg bg-muted/30 dark:bg-card px-3.5 py-2.5">
           <div className="grid grid-cols-3 gap-2">
             <div className="flex min-w-0 flex-col items-start gap-0.5 text-left">
               <span className="text-[11px] font-medium text-muted-foreground">

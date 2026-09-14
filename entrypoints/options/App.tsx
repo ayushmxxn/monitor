@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { CreatorCredit } from "@/components/layout/CreatorCredit";
+import { SocialLinks } from "@/components/layout/SocialLinks";
 import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { Header } from "@/components/layout/Header";
 import { ClearAllMonitorsDialog } from "@/components/settings/ClearAllMonitorsDialog";
@@ -64,16 +64,6 @@ function OptionsContent() {
         </div>
 
         <SettingsSection title="General">
-          <SettingRow
-            id="notifications"
-            label="Notifications"
-            description="Show a system notification for future monitor alerts."
-            checked={settings.notificationsEnabled}
-            disabled={isLoading}
-            onCheckedChange={(checked) =>
-              setSettings({ ...settings, notificationsEnabled: checked })
-            }
-          />
           <SettingSelectRow
             id="default-interval"
             label="Check interval"
@@ -87,8 +77,7 @@ function OptionsContent() {
           />
           <SettingSelectRow
             id="theme"
-            label="Theme"
-            description="Choose the appearance used throughout Monitor."
+            label="Appearance"
             value={settings.theme}
             disabled={isLoading}
             options={[
@@ -99,33 +88,50 @@ function OptionsContent() {
           />
         </SettingsSection>
 
-        <SiteAccessSection />
+        <SettingsSection title="Notifications & Alerts">
+          <SettingRow
+            id="notifications"
+            label="System notifications"
+            checked={settings.notificationsEnabled}
+            disabled={isLoading}
+            onCheckedChange={(checked) =>
+              setSettings({ ...settings, notificationsEnabled: checked })
+            }
+          />
+          <SettingRow
+            id="sound"
+            label="Sound"
+            checked={settings.soundEnabled}
+            disabled={isLoading}
+            onCheckedChange={(checked) =>
+              setSettings({ ...settings, soundEnabled: checked })
+            }
+          />
+          <DiscordSettings
+            settings={settings}
+            onChange={setSettings}
+            disabled={isLoading}
+            idPrefix="options"
+          />
+          <TelegramSettings
+            settings={settings}
+            onChange={setSettings}
+            disabled={isLoading}
+            idPrefix="options"
+          />
+          <WebhookSettings
+            settings={settings}
+            onChange={setSettings}
+            disabled={isLoading}
+            idPrefix="options"
+          />
+        </SettingsSection>
 
-        <WebhookSettings
-          settings={settings}
-          onChange={setSettings}
-          disabled={isLoading}
-          idPrefix="options"
-        />
-
-        <DiscordSettings
-          settings={settings}
-          onChange={setSettings}
-          disabled={isLoading}
-          idPrefix="options"
-        />
-
-        <TelegramSettings
-          settings={settings}
-          onChange={setSettings}
-          disabled={isLoading}
-          idPrefix="options"
-        />
-
-        <SettingsSection title="Data">
+        <SettingsSection title="Advanced">
+          <SiteAccessSection standalone={false} />
           <SettingActionRow
             label="Clear all monitors"
-            description="Permanently removes every monitor and its check history."
+            description="Delete all monitors and historical checks."
             action={
               <ClearAllMonitorsDialog
                 monitorCount={monitors.length}
@@ -145,16 +151,16 @@ function OptionsContent() {
           />
         </SettingsSection>
 
-        <SettingsSection title="Feedback">
+        <SettingsSection title="About & Feedback">
           <SettingLinkRow label="Send feedback" href={FEEDBACK_URL} />
           <SettingLinkRow label="Rate Monitor" href={getWebStoreUrl()} />
+          <SettingActionRow label="Socials" action={<SocialLinks />} />
         </SettingsSection>
 
         <div className="flex items-center justify-between border-t border-border pb-2 pt-4">
           <span className="text-xs text-muted-foreground">
             {APP_NAME} {appInfo ? `v${appInfo.version}` : ""}
           </span>
-          <CreatorCredit />
         </div>
       </main>
     </div>

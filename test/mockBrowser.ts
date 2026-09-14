@@ -1,4 +1,6 @@
-function createStorageArea() {
+const storageChangeListeners: ((changes: any, areaName: string) => void)[] = [];
+
+function createStorageArea(areaName: string) {
   const storageMap = new Map<string, any>();
   return {
     get: async (keys?: any) => {
@@ -16,11 +18,31 @@ function createStorageArea() {
       return res;
     },
     set: async (items: Record<string, any>) => {
-      for (const [k, v] of Object.entries(items)) storageMap.set(k, v);
+      const changes: Record<string, { oldValue?: any; newValue: any }> = {};
+      for (const [k, v] of Object.entries(items)) {
+        changes[k] = { oldValue: storageMap.get(k), newValue: v };
+        storageMap.set(k, v);
+      }
+      for (const listener of storageChangeListeners) {
+        try {
+          listener(changes, areaName);
+        } catch {}
+      }
     },
     remove: async (keys: string | string[]) => {
       const arr = Array.isArray(keys) ? keys : [keys];
-      for (const k of arr) storageMap.delete(k);
+      const changes: Record<string, { oldValue?: any; newValue?: any }> = {};
+      for (const k of arr) {
+        if (storageMap.has(k)) {
+          changes[k] = { oldValue: storageMap.get(k) };
+          storageMap.delete(k);
+        }
+      }
+      for (const listener of storageChangeListeners) {
+        try {
+          listener(changes, areaName);
+        } catch {}
+      }
     },
     clear: async () => {
       storageMap.clear();
@@ -80,9 +102,18 @@ export const mockBrowser = {
     },
   },
   storage: {
-    local: createStorageArea(),
-    session: createStorageArea(),
-    sync: createStorageArea(),
+    local: createStorageArea('local'),
+    session: createStorageArea('session'),
+    sync: createStorageArea('sync'),
+    onChanged: {
+      addListener: (cb: any) => {
+        storageChangeListeners.push(cb);
+      },
+      removeListener: (cb: any) => {
+        const idx = storageChangeListeners.indexOf(cb);
+        if (idx !== -1) storageChangeListeners.splice(idx, 1);
+      },
+    },
   },
 };
 

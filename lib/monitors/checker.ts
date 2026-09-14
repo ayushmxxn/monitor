@@ -211,6 +211,40 @@ export async function recordSuccess(
   }
   const current = currentResult.value;
 
+  // Zero-cliff guard: a numeric reading of exactly zero against an
+  // established non-zero numeric series is overwhelmingly more likely
+  // a transient/loading render (animated-counter start, skeleton slot,
+  // unhydrated widget, SSR initial state) than a genuine cliff — and a
+  // single such write permanently poisons all-time low (`Math.min`
+  // never recovers upward), average, and the chart, even after later
+  // checks restore the real value. Refuse to commit it: keep the last
+  // known good value, skip history/stats/alerts/sound entirely, and
+  // only advance the check timestamp so scheduling stays honest.
+  // Fresh monitors (no prior value) and already-zero series still
+  // store zero normally, so a website genuinely reporting 0 keeps
+  // working. Deliberate trade-off: a true permanent cliff to exactly
+  // zero stays preserved until re-picked — far safer than letting one
+  // bad read destroy months of aggregates.
+  const prevNormalized =
+    current.lastValue !== null &&
+    current.lastSemanticValue &&
+    current.lastSemanticValue.type !== 'text'
+      ? current.lastSemanticValue.normalized
+      : null;
+  const nextNormalized =
+    outcome.semanticValue && outcome.semanticValue.type !== 'text'
+      ? outcome.semanticValue.normalized
+      : null;
+  if (
+    nextNormalized === 0 &&
+    typeof prevNormalized === 'number' &&
+    Number.isFinite(prevNormalized) &&
+    prevNormalized !== 0
+  ) {
+    await updateMonitor(monitor.id, { lastCheckedAt: now });
+    return;
+  }
+
   const changed = hasValueChanged(current.lastValue, current.lastSemanticValue, value, outcome.semanticValue);
 
   let nextStats: HistoricalStats | null = current.stats ?? null;

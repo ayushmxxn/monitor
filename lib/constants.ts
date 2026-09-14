@@ -17,6 +17,8 @@ export const FEEDBACK_URL = 'https://tally.so/r/0Qq7GN';
 export const CREATOR_HANDLE = '@ayushmxxn';
 export const CREATOR_PORTFOLIO_URL = 'https://ayushmxxn.com/';
 export const CREATOR_TWITTER_URL = 'https://x.com/ayushmxxn';
+/** Creator Discord server, linked from the settings footer social row. */
+export const CREATOR_DISCORD_URL = 'https://discord.com/invite/kzk6uWey3g';
 
 /**
  * This extension's own Chrome Web Store listing, linked from Settings

@@ -10,6 +10,7 @@ interface UseMonitorsResult {
   isLoading: boolean;
   error: AppError | null;
   remove: (id: string) => Promise<boolean>;
+  reorder: (orderedIds: string[]) => Promise<boolean>;
 }
 
 /**
@@ -33,5 +34,12 @@ export function useMonitors(): UseMonitorsResult {
     return result.ok;
   }, []);
 
-  return { monitors, isLoading, error, remove };
+  const reorder = useCallback(async (orderedIds: string[]): Promise<boolean> => {
+    setError(null);
+    const result = await store.reorderMonitors(orderedIds);
+    if (!result.ok) setError(result.error);
+    return result.ok;
+  }, []);
+
+  return { monitors, isLoading, error, remove, reorder };
 }

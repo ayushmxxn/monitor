@@ -29,7 +29,6 @@ import { MonitorList } from '@/components/monitors/MonitorList';
 import { MonitorListSkeleton } from '@/components/monitors/MonitorListSkeleton';
 import { MonitorDetail } from '@/components/monitors/MonitorDetail';
 import { InlineNotice } from '@/components/layout/InlineNotice';
-import { CreatorCredit } from '@/components/layout/CreatorCredit';
 import { PanelSettings } from '@/components/panel/PanelSettings';
 import { useMonitors } from '@/hooks/useMonitors';
 import { useElementPicker } from '@/hooks/useElementPicker';
@@ -38,6 +37,7 @@ import { usePageAccess } from '@/hooks/usePageAccess';
 import { useExtensionInvalidated } from '@/hooks/useExtensionInvalidated';
 import { useAppInfo } from '@/hooks/useAppInfo';
 import { checkAllMonitorsNow } from '@/lib/monitors/client';
+import { mergeVisibleOrder, sameIdOrder } from '@/lib/monitors/order';
 import { panelWidthItem, settingsItem } from '@/lib/storage/items';
 import { PortalContainerContext } from '@/lib/portalContainer';
 import { ConfettiBurst, type ConfettiBurstHandle } from '@/components/ui/ConfettiBurst';
@@ -165,6 +165,30 @@ const SourceFilterDropdown = memo(function SourceFilterDropdown({
 }: SourceFilterDropdownProps) {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const [highlight, setHighlight] = useState<{
+    top: number;
+    height: number;
+    opacity: number;
+  } | null>(null);
+
+  const handleItemEnter = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
+    const container = listRef.current;
+    if (!container) return;
+    const cRect = container.getBoundingClientRect();
+    const iRect = e.currentTarget.getBoundingClientRect();
+    setHighlight({
+      top: iRect.top - cRect.top + container.scrollTop,
+      height: iRect.height,
+      opacity: 1,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setHighlight(null);
+    }
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -240,20 +264,45 @@ const SourceFilterDropdown = memo(function SourceFilterDropdown({
           aria-label="Source filter options"
           className="absolute bottom-full right-0 z-50 mb-1.5 min-w-[140px] max-w-[220px] rounded-md border border-border bg-popover p-1 shadow-lg animate-enter-up"
         >
-          <div className="max-h-48 overflow-y-auto space-y-0.5">
+          <div
+            ref={listRef}
+            onMouseLeave={() => setHighlight((h) => (h ? { ...h, opacity: 0 } : null))}
+            onScroll={() => setHighlight((h) => (h ? { ...h, opacity: 0 } : null))}
+            className="relative max-h-48 overflow-y-auto space-y-0.5"
+          >
+            {highlight && (
+              <span
+                aria-hidden
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  right: 0,
+                  top: highlight.top,
+                  height: highlight.height,
+                  opacity: highlight.opacity,
+                  borderRadius: 4,
+                  background: 'hsl(var(--accent))',
+                  transition:
+                    'top 130ms cubic-bezier(0.4,0,0.2,1), height 130ms cubic-bezier(0.4,0,0.2,1), opacity 80ms ease',
+                  pointerEvents: 'none',
+                  zIndex: 0,
+                }}
+              />
+            )}
             <button
               type="button"
               role="option"
               aria-selected={selectedSource === 'all'}
+              onMouseEnter={handleItemEnter}
               onClick={() => {
                 onSelect('all');
                 setIsOpen(false);
               }}
               className={cn(
-                'flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] transition-colors',
+                'relative z-10 flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] transition-colors',
                 selectedSource === 'all'
                   ? 'bg-accent font-medium text-accent-foreground'
-                  : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
+                  : 'text-muted-foreground hover:text-foreground',
               )}
             >
               <Globe className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -273,15 +322,16 @@ const SourceFilterDropdown = memo(function SourceFilterDropdown({
                   type="button"
                   role="option"
                   aria-selected={selectedSource === source}
+                  onMouseEnter={handleItemEnter}
                   onClick={() => {
                     onSelect(source);
                     setIsOpen(false);
                   }}
                   className={cn(
-                    'flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] transition-colors',
+                    'relative z-10 flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] transition-colors',
                     selectedSource === source
                       ? 'bg-accent font-medium text-accent-foreground'
-                      : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
+                      : 'text-muted-foreground hover:text-foreground',
                   )}
                 >
                   <Favicon url={sourceUrl} size={13} className="shrink-0" />
@@ -314,7 +364,7 @@ function PanelContent({
   shadowHost: HTMLElement;
   shadowContainer?: HTMLElement;
 }) {
-  const { monitors, isLoading, error, remove } = useMonitors();
+  const { monitors, isLoading, error, remove, reorder } = useMonitors();
   const isInvalidated = useExtensionInvalidated();
   const { appInfo } = useAppInfo();
   const [settings] = useStorage(settingsItem);
@@ -389,6 +439,22 @@ function PanelContent({
     setSelectedMonitorId(null);
   }, []);
 
+  // Home-grid reorder: `MonitorList` reports the new *visible* order
+  // (which equals the global order unless a source filter is active).
+  // When filtered, visible items keep their current slots — only which
+  // visible id sits in which slot changes — so non-visible monitors
+  // never jump. Persisted via the monitors array itself, so reload
+  // restores it exactly with no extra key or migration.
+  const handleReorder = useCallback(
+    async (visibleOrderedIds: string[]): Promise<boolean> => {
+      const globalIds = monitors.map((m) => m.id);
+      const nextGlobal = mergeVisibleOrder(globalIds, visibleOrderedIds);
+      if (sameIdOrder(nextGlobal, globalIds)) return true;
+      return reorder(nextGlobal);
+    },
+    [monitors, reorder],
+  );
+
   // Persisted width (survives reloads/new tabs) vs. live width (updated
   // every pointer-move during a drag). Keeping these separate means a
   // resize never writes to storage more than once, on release - writing
@@ -445,10 +511,16 @@ function PanelContent({
   }, [isOpen, onClose, picker.state, shadowHost]);
 
   async function handleRefreshAll() {
-    if (isInvalidated) return;
+    if (isInvalidated || isRefreshingAll) return;
     setIsRefreshingAll(true);
     setRefreshError(null);
-    const result = await checkAllMonitorsNow();
+    // Hand the enabled ids over so every card being checked flips to its
+    // Checking state immediately; each flips back as its own result
+    // lands (see `isMonitorChecking`). The button stays disabled until
+    // the batch settles, so a second global refresh cannot start early.
+    const result = await checkAllMonitorsNow(
+      monitors.filter((m) => m.enabled).map((m) => m.id),
+    );
     if (!result.ok) setRefreshError(result.error.toDisplayMessage());
     setIsRefreshingAll(false);
   }
@@ -510,11 +582,10 @@ function PanelContent({
       }}
       className={cn(
         'pointer-events-auto fixed top-5 bottom-5 right-5 z-[2147483647] flex overflow-hidden rounded-xl font-sans',
-        // No `border-l`: the resize handle already renders its own
-        // hairline on the left edge (see the separator below), so a
-        // full `border` here would double it up as two adjacent lines.
-        'border-y border-r border-black/[0.08] dark:border-border bg-background text-foreground',
-        'shadow-[0_1px_1px_rgba(0,0,0,0.03),0_12px_28px_-8px_rgba(0,0,0,0.22),0_32px_64px_-24px_rgba(0,0,0,0.28)] dark:shadow-[0_8px_24px_-4px_rgba(0,0,0,0.4),0_20px_48px_-8px_rgba(0,0,0,0.5)]',
+        // Subtle 1px border for definition against light webpage backgrounds;
+        // dark mode preserves previous styling without a left border.
+        'border border-black/[0.08] dark:border-l-0 dark:border-border bg-background text-foreground',
+        'shadow-[0_1px_3px_rgba(0,0,0,0.05)] dark:shadow-[0_8px_24px_-4px_rgba(0,0,0,0.4),0_20px_48px_-8px_rgba(0,0,0,0.5)]',
         'transition-transform duration-200',
         !isOpen && 'translate-x-[calc(100%+20px)]',
         isDragging.current && 'transition-none',
@@ -687,6 +758,7 @@ function PanelContent({
                   monitors={filteredMonitors}
                   onDelete={remove}
                   onOpen={openDetail}
+                  onReorder={handleReorder}
                   emptyAction={
                     <Button
                       size="sm"
@@ -728,7 +800,6 @@ function PanelContent({
                     : `${filteredMonitors.length} monitor${filteredMonitors.length === 1 ? '' : 's'}`}
             </span>
           )}
-          {view === 'settings' && <CreatorCredit />}
           {view === 'monitors' && !isLoading && (
             <SourceFilterDropdown
               sources={sources}

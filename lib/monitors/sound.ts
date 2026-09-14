@@ -1,5 +1,6 @@
 import { play } from 'cuelume';
 import { sendMessage } from '@/lib/messaging';
+import { settingsItem } from '@/lib/storage/items';
 
 /** Subtle volume for interaction cues (0.3–0.4 range). */
 export const CUE_VOLUME = 0.35;
@@ -16,14 +17,58 @@ export function setCueListenerForTesting(listener: CueListener | null): void {
   testListener = listener;
 }
 
+let cachedSoundEnabled = true;
+
+/**
+ * Synchronizes the in-memory sound preference cache with persistent storage.
+ */
+export async function syncSoundSetting(): Promise<boolean> {
+  try {
+    const settings = await settingsItem.getValue();
+    if (settings && typeof settings.soundEnabled === 'boolean') {
+      cachedSoundEnabled = settings.soundEnabled;
+    }
+  } catch {
+    // Best-effort cache synchronization
+  }
+  return cachedSoundEnabled;
+}
+
+// Initial best-effort synchronization
+void syncSoundSetting();
+
+// Keep cache synchronized on live changes across processes
+try {
+  settingsItem.watch((newSettings) => {
+    if (newSettings && typeof newSettings.soundEnabled === 'boolean') {
+      cachedSoundEnabled = newSettings.soundEnabled;
+    }
+  });
+} catch {
+  // Safe fallback if watching is not supported in the active environment
+}
+
+export function isSoundEnabled(): boolean {
+  return cachedSoundEnabled;
+}
+
+export function setSoundEnabledForTesting(enabled: boolean | null): void {
+  cachedSoundEnabled = enabled ?? true;
+}
+
 /**
  * Plays a Cuelume interaction cue.
  *
+ * - Suppressed completely if global sound setting is disabled.
  * - Synthesizes live Web Audio when called in a window/DOM context (content script, panel, options).
  * - Relays to the active focused tab via messaging when called from the background worker.
  * - Fails safely with zero disruption to monitor checking if audio is unavailable.
  */
 export function playCue(cue: MonitorCue, volume = CUE_VOLUME): void {
+  if (!cachedSoundEnabled) {
+    return;
+  }
+
   if (testListener) {
     testListener(cue, volume);
   }

@@ -1,9 +1,7 @@
 import { useState } from 'react';
 import { SettingRow } from '@/components/settings/SettingRow';
-import { SettingsSection } from '@/components/settings/SettingsSection';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { buildWebhookPayload, isValidWebhookUrl, testWebhookDelivery } from '@/lib/monitors/webhook';
 import type { AppSettings } from '@/lib/storage';
 
@@ -41,11 +39,10 @@ export function WebhookSettings({ settings, onChange, disabled, idPrefix }: Webh
   }
 
   return (
-    <SettingsSection title="Webhook">
+    <div>
       <SettingRow
         id={`${idPrefix}-webhook-enabled`}
-        label="Webhook alerts"
-        description="POST monitor alerts as JSON to your URL."
+        label="Custom webhook"
         checked={settings.webhookEnabled}
         disabled={disabled}
         onCheckedChange={(checked) => {
@@ -54,47 +51,40 @@ export function WebhookSettings({ settings, onChange, disabled, idPrefix }: Webh
         }}
       />
       {settings.webhookEnabled && (
-        <div className="flex flex-col gap-2 px-3 py-2.5">
-          <Label htmlFor={`${idPrefix}-webhook-url`} className="text-[13px] font-normal leading-tight">
-            Webhook URL
-          </Label>
+        <div className="flex flex-col gap-2 border-t border-border/50 bg-muted/20 px-3.5 py-2.5">
           <div className="flex items-center gap-2">
             <Input
               id={`${idPrefix}-webhook-url`}
               type="url"
               inputMode="url"
-              placeholder="https://example.com/hooks/monitor"
+              placeholder="Webhook URL (https://...)"
               value={settings.webhookUrl}
               disabled={disabled}
               onChange={(e) => {
                 setTestState('idle');
                 void onChange({ ...settings, webhookUrl: e.target.value });
               }}
-              className="h-7 text-[12.5px]"
+              className="h-7 bg-background text-xs"
             />
             <Button
               size="sm"
               variant="outline"
-              className="h-7 shrink-0 text-xs"
+              className="h-7 shrink-0 px-2.5 text-xs font-normal"
               disabled={disabled || !isValidWebhookUrl(settings.webhookUrl) || testState === 'sending'}
               onClick={handleTest}
             >
-              {testState === 'sending' ? 'Sending…' : 'Test'}
+              {testState === 'sending' ? 'Sending…' : testState === 'sent' ? 'Sent ✓' : 'Test'}
             </Button>
           </div>
           {!urlValid ? (
-            <p className="text-[11.5px] leading-snug text-destructive">Enter a valid http(s) URL.</p>
+            <p className="text-[11px] text-destructive">Enter a valid http(s) URL.</p>
           ) : testState === 'sent' ? (
-            <p className="text-[11.5px] leading-snug text-muted-foreground">Test delivered.</p>
+            <p className="text-[11px] text-muted-foreground">Test alert delivered successfully.</p>
           ) : testState === 'failed' ? (
-            <p className="text-[11.5px] leading-snug text-destructive">Test failed. Check the URL and try again.</p>
-          ) : (
-            <p className="text-[11.5px] leading-snug text-muted-foreground">
-              Alerts are POSTed as JSON and never block checks.
-            </p>
-          )}
+            <p className="text-[11px] text-destructive">Delivery failed. Check the endpoint URL.</p>
+          ) : null}
         </div>
       )}
-    </SettingsSection>
+    </div>
   );
 }

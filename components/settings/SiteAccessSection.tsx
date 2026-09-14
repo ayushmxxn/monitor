@@ -17,7 +17,7 @@ import { monitorsItem } from '@/lib/storage/items';
  * origin is ever requested, never a broad pattern. After a grant the
  * statuses are re-checked so the UI reflects recovery immediately.
  */
-export function SiteAccessSection() {
+export function SiteAccessSection({ standalone = true }: { standalone?: boolean } = {}) {
   const [monitors] = useStorage(monitorsItem);
   const [granted, setGranted] = useState<Record<string, boolean>>({});
   const [checked, setChecked] = useState(false);
@@ -95,20 +95,23 @@ export function SiteAccessSection() {
 
   const revoked = checked ? origins.filter(([origin]) => granted[origin] === false) : [];
 
-  return (
-    <SettingsSection title="Site access">
+  const inner = (
+    <>
       {origins.length === 0 ? (
-        <p className="px-3 py-2.5 text-[11.5px] leading-snug text-muted-foreground">
-          No monitored sites yet. Access is requested per site when you start monitoring it.
-        </p>
+        <div className="flex items-center justify-between px-3.5 py-2.5">
+          <span className="text-[13px] text-foreground">Site permissions</span>
+          <span className="text-xs text-muted-foreground">Granted per site</span>
+        </div>
       ) : !checked ? (
-        <p className="px-3 py-2.5 text-[11.5px] leading-snug text-muted-foreground">
-          Checking site access…
-        </p>
+        <div className="flex items-center justify-between px-3.5 py-2.5">
+          <span className="text-[13px] text-foreground">Site permissions</span>
+          <span className="text-xs text-muted-foreground">Checking…</span>
+        </div>
       ) : revoked.length === 0 ? (
-        <p className="px-3 py-2.5 text-[11.5px] leading-snug text-muted-foreground">
-          Monitor can access {origins.length === 1 ? 'your monitored site' : 'all monitored sites'}.
-        </p>
+        <div className="flex items-center justify-between px-3.5 py-2.5">
+          <span className="text-[13px] text-foreground">Site permissions</span>
+          <span className="text-xs text-muted-foreground">All active ({origins.length})</span>
+        </div>
       ) : (
         revoked.map(([origin, url]) => (
           <SettingActionRow
@@ -119,7 +122,7 @@ export function SiteAccessSection() {
               <Button
                 size="sm"
                 variant="outline"
-                className="h-7 shrink-0 text-xs"
+                className="h-7 shrink-0 text-xs font-normal"
                 aria-label={`Grant access to ${new URL(origin).hostname}`}
                 disabled={pendingOrigin !== null}
                 onClick={() => handleGrant(origin, url)}
@@ -131,10 +134,20 @@ export function SiteAccessSection() {
         ))
       )}
       {error && (
-        <p role="alert" className="px-3 py-2 text-[11.5px] leading-snug text-destructive">
+        <p role="alert" className="border-t border-border/50 px-3.5 py-2 text-[11px] leading-snug text-destructive">
           {error}
         </p>
       )}
+    </>
+  );
+
+  if (!standalone) {
+    return inner;
+  }
+
+  return (
+    <SettingsSection title="Site access">
+      {inner}
     </SettingsSection>
   );
 }

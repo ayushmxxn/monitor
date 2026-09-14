@@ -171,6 +171,50 @@ export function setAllMonitorsInterval(minutes: number): Promise<Result<void>> {
   );
 }
 
+/**
+ * Persists a new home-screen order. Array order *is* the order (no
+ * separate key, no schema change): the same monitors are written back
+ * in the requested sequence, so reloading restores it exactly.
+ * Unknown ids are ignored; monitors missing from `orderedIds` (created
+ * concurrently elsewhere) are appended in place so a reorder never
+ * drops data. No-op reorders skip the write to avoid spurious
+ * `chrome.storage.onChanged` churn. Monitoring/check state is untouched
+ * — only positions change.
+ */
+export function reorderMonitors(orderedIds: string[]): Promise<Result<void>> {
+  return tryCatch(
+    () =>
+      withWriteLock(MONITORS_LOCK_KEY, async () => {
+        const current = await monitorsItem.getValue();
+        if (current.length <= 1) return;
+        const byId = new Map(current.map((m) => [m.id, m] as const));
+        const seen = new Set<string>();
+        const next: typeof current = [];
+        for (const id of orderedIds) {
+          const m = byId.get(id);
+          if (m && !seen.has(id)) {
+            seen.add(id);
+            next.push(m);
+          }
+        }
+        for (const m of current) {
+          if (!seen.has(m.id)) next.push(m);
+        }
+        let changed = next.length !== current.length;
+        if (!changed) {
+          for (let i = 0; i < next.length; i++) {
+            if (next[i]!.id !== current[i]!.id) {
+              changed = true;
+              break;
+            }
+          }
+        }
+        if (changed) await monitorsItem.setValue(next);
+      }),
+    "STORAGE_WRITE_FAILED",
+  );
+}
+
 export function deleteMonitor(id: string): Promise<Result<void>> {
   return tryCatch(
     () =>

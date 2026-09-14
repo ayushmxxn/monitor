@@ -32,21 +32,25 @@ const REMOVE_TRANSITION_MS = 180;
  * A single bento tile on the panel's home screen: the value front
  * and center, the site's favicon + monitor name + last-updated time
  * below it, nothing else - no URL, no controls - so the grid reads as
- * data at a glance. Delete is still reachable, tucked behind a hover
- * reveal in the corner rather than competing with the value for
- * attention; everything else (interval, strategy, diagnostics) lives
- * one click away in the detail view opened by clicking the tile -
+ * data at a glance. Reload + delete are still reachable, tucked behind
+ * a hover reveal in the corner rather than competing with the value
+ * for attention; everything else (interval, strategy, diagnostics)
+ * lives one click away in the detail view opened by clicking the tile -
  * shown inline in the panel itself, never a new tab.
  */
 export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen }: MonitorCardProps) {
   const [isRemoving, setIsRemoving] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
-  const isError = monitor.lastStatus === "error";
+  const isCheckingInFlight = useIsChecking(monitor.id, monitor.lastCheckedAt);
+  // While a check is in flight the stored status is stale by definition:
+  // suppress the error presentation so the card reads Checking (existing
+  // value kept visible) instead of flashing the old failure until the
+  // fresh result lands.
+  const isError = monitor.lastStatus === "error" && !isCheckingInFlight;
   const failureInfo = isError
     ? getFailureStateInfo(monitor.lastDiagnosticCode, monitor.lastError)
     : null;
-  const isCheckingInFlight = useIsChecking(monitor.id);
   const isChecking = isCheckingInFlight || monitor.lastStatus === "checking";
   const isCheckingActive = isChecking || isRetrying;
   const hasValue = monitor.lastValue !== null;
@@ -223,14 +227,10 @@ export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen
       )}
 
       <div
-        className={cn(
-          "absolute right-1 top-1 flex items-center gap-0.5 transition-opacity duration-150",
-          isError
-            ? "opacity-100"
-            : "opacity-0 focus-within:opacity-100 group-hover:opacity-100",
-        )}
+        data-no-drag
+        className="absolute right-1 top-1 flex items-center gap-0.5 transition-opacity duration-150 opacity-0 focus-within:opacity-100 group-hover:opacity-100"
       >
-        {isError && failureInfo?.canRetry && monitor.enabled && (
+        {monitor.enabled && (!isError || (failureInfo?.canRetry ?? true)) && (
           <button
             type="button"
             aria-label={`Check ${monitor.name} now`}
@@ -254,6 +254,7 @@ export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen
             <button
               type="button"
               aria-label={`Delete ${monitor.name}`}
+              title="Delete"
               className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <Trash2 className="h-3 w-3" />

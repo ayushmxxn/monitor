@@ -6,7 +6,7 @@
  * state at a glance and to reason about migrations as fields are added.
  */
 
-export const SETTINGS_SCHEMA_VERSION = 5;
+export const SETTINGS_SCHEMA_VERSION = 6;
 
 export type Theme = 'light' | 'dark';
 
@@ -14,6 +14,8 @@ export interface AppSettings {
   schemaVersion: number;
   /** Whether the extension may show system notifications for future checks. */
   notificationsEnabled: boolean;
+  /** Whether sounds should play for monitor updates and errors. */
+  soundEnabled: boolean;
   /**
    * How often, in minutes, every monitor is checked. A single global
    * value rather than a per-monitor setting - simpler to reason about
@@ -57,6 +59,7 @@ export interface AppSettings {
 export const DEFAULT_SETTINGS: AppSettings = {
   schemaVersion: SETTINGS_SCHEMA_VERSION,
   notificationsEnabled: true,
+  soundEnabled: true,
   defaultIntervalMinutes: 30,
   theme: 'light',
   webhookEnabled: false,

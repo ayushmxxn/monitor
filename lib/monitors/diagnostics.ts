@@ -19,6 +19,7 @@ export type DiagnosticCode =
   | 'SELECTOR_RECOVERY_LOW_CONFIDENCE'
   | 'EXTRACTION_EMPTY'
   | 'NEEDS_REPICK'
+  | 'ACCESS_CHANGED'
   | 'TAB_CLOSED'
   | 'OK'
   | 'OK_RECOVERED'
@@ -39,17 +40,19 @@ const EXPLANATIONS: Record<DiagnosticCode, string> = {
   NETWORK_ERROR: 'The request to load the page failed (offline, DNS, or connection error).',
   PAGE_LOAD_TIMEOUT: 'The page did not finish loading in time.',
   PAGE_NOT_READY:
-    'The page kept changing (scripts, animations, or streaming content) and never settled into a stable state before the time budget ran out.',
+    'The page kept changing and never settled, so the check ran out of time.',
   ANTI_AUTOMATION_DETECTED:
     'The site is showing a bot-verification or challenge page instead of its normal content. This is usually temporary — checks keep retrying automatically and never attempt to bypass it.',
   ELEMENT_NOT_FOUND:
-    'The original element is gone and no reasonably similar element could be found to take its place.',
+    'The monitored value is no longer on the page, and nothing similar enough was found to take its place.',
   SELECTOR_RECOVERY_LOW_CONFIDENCE:
-    'The page changed enough that the closest matching element only partially resembles the original — it was not used automatically.',
-  EXTRACTION_EMPTY: 'The element was found but currently has no text (or the configured attribute is empty).',
+    'The page changed, and the closest match was too uncertain to use automatically.',
+  EXTRACTION_EMPTY: 'The monitored spot was found, but it is currently empty.',
   NEEDS_REPICK:
     'The saved element can no longer be found on this page, even when retrying from the last known value. Delete this monitor and pick the value again to resume monitoring.',
-  TAB_CLOSED: 'The background tab used for this check was closed before it finished.',
+  ACCESS_CHANGED:
+    'This monitor was created under a different account or workspace. Switch back to the original account and retry — the saved position is kept unchanged so it can recover automatically.',
+  TAB_CLOSED: 'The check was interrupted before it finished.',
   OK: 'Checked successfully.',
   OK_RECOVERED: 'The original element moved or changed, but a matching replacement was found automatically.',
   UNKNOWN: 'An unexpected error occurred.',
@@ -81,6 +84,7 @@ export const FORCE_REPROBE_CODES: ReadonlySet<DiagnosticCode> = new Set([
   'SELECTOR_RECOVERY_LOW_CONFIDENCE',
   'EXTRACTION_EMPTY',
   'NEEDS_REPICK',
+  'ACCESS_CHANGED',
   'NETWORK_ERROR',
   'PAGE_LOAD_TIMEOUT',
   'TAB_CLOSED',
@@ -168,6 +172,7 @@ export type FailureReason =
   | 'page_load_failed'
   | 'blocked'
   | 'auth_required'
+  | 'access_changed'
   | 'permission_denied'
   | 'unknown';
 
@@ -195,8 +200,8 @@ export function getFailureStateInfo(
         label: 'Value not found',
         description:
           code === 'EXTRACTION_EMPTY'
-            ? 'The element was found but has no text or content to monitor.'
-            : 'The monitored value could not be found on the page.',
+            ? 'The monitored spot is there, but it is currently empty. It will keep checking automatically.'
+            : 'The monitored value could not be found on the page. It will keep checking automatically.',
         canRetry: true,
         actionLabel: 'Check now',
       };
@@ -206,7 +211,7 @@ export function getFailureStateInfo(
         reason: 'page_changed',
         label: 'Page changed',
         description:
-          'The page layout or structure changed and no matching element could be verified with confidence.',
+          'The page changed and the closest match was too uncertain to use. It will keep checking automatically.',
         canRetry: true,
         actionLabel: 'Check now',
       };
@@ -221,6 +226,16 @@ export function getFailureStateInfo(
         actionLabel: 'Check now',
       };
 
+    case 'ACCESS_CHANGED':
+      return {
+        reason: 'access_changed',
+        label: 'Access changed',
+        description:
+          'This monitor was created under a different account or workspace. Switch back to the original account and try again.',
+        canRetry: true,
+        actionLabel: 'Check now',
+      };
+
     case 'NETWORK_ERROR':
     case 'PAGE_LOAD_TIMEOUT':
     case 'PAGE_NOT_READY':
@@ -230,12 +245,12 @@ export function getFailureStateInfo(
         label: "Couldn't load page",
         description:
           code === 'NETWORK_ERROR'
-            ? 'The page could not be reached due to a connection or network error.'
+            ? 'The page could not be reached because of a network or connection problem. It will try again automatically.'
             : code === 'PAGE_LOAD_TIMEOUT'
-              ? 'The page took too long to load and timed out.'
+              ? 'The page took too long to load. It will try again automatically.'
               : code === 'PAGE_NOT_READY'
-                ? 'The page kept updating and did not settle in time.'
-                : 'The tab used to check this page was closed.',
+                ? 'The page kept changing and never settled in time. It will try again automatically.'
+                : 'The check was interrupted before it finished. It will try again automatically.',
         canRetry: true,
         actionLabel: 'Check now',
       };
@@ -245,7 +260,7 @@ export function getFailureStateInfo(
         reason: 'blocked',
         label: 'Blocked',
         description:
-          'The site is showing a bot-verification or challenge page. Checks will retry automatically.',
+          'The site is showing a verification challenge instead of its normal content. This is usually temporary — checks will retry automatically.',
         canRetry: true,
         actionLabel: 'Check now',
       };
@@ -255,7 +270,7 @@ export function getFailureStateInfo(
         reason: 'auth_required',
         label: 'Sign-in required',
         description:
-          'The page requires authentication. Log in to the site in your browser to resume checks.',
+          'The page is showing a sign-in screen — you may be logged out. Log in to the site in your browser to resume checks.',
         canRetry: true,
         actionLabel: 'Check now',
       };
@@ -271,13 +286,19 @@ export function getFailureStateInfo(
       };
 
     default: {
+      // Unknown codes (or missing codes with a stored technical trace)
+      // still map to the right human bucket by the trace's shape — but
+      // the raw trace itself is never user-facing copy. It stays in
+      // storage/history for debugging; the UI shows the fixed sentences
+      // below instead.
       if (errorText) {
         const lower = errorText.toLowerCase();
         if (/timeout|timed out|network|offline|dns|connection|load.*failed|frame.*removed|tab.*closed/i.test(lower)) {
           return {
             reason: 'page_load_failed',
             label: "Couldn't load page",
-            description: errorText,
+            description:
+              'The page took too long to respond. It will try again automatically.',
             canRetry: true,
             actionLabel: 'Check now',
           };
@@ -286,7 +307,8 @@ export function getFailureStateInfo(
           return {
             reason: 'value_not_found',
             label: 'Value not found',
-            description: errorText,
+            description:
+              'The monitored value could not be found on the page. It will keep checking automatically.',
             canRetry: true,
             actionLabel: 'Check now',
           };
@@ -295,7 +317,8 @@ export function getFailureStateInfo(
           return {
             reason: 'page_changed',
             label: 'Page changed',
-            description: errorText,
+            description:
+              'The page changed and the closest match was too uncertain to use. It will keep checking automatically.',
             canRetry: true,
             actionLabel: 'Check now',
           };
@@ -304,7 +327,7 @@ export function getFailureStateInfo(
       return {
         reason: 'unknown',
         label: 'Check failed',
-        description: errorText || 'An unexpected failure occurred while checking the monitor.',
+        description: 'Something unexpected happened. Please try again.',
         canRetry: true,
         actionLabel: 'Check now',
       };

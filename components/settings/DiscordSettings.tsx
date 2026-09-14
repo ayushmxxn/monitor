@@ -1,9 +1,7 @@
 import { useState } from 'react';
 import { SettingRow } from '@/components/settings/SettingRow';
-import { SettingsSection } from '@/components/settings/SettingsSection';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { buildDiscordPayload, isValidDiscordWebhookUrl, testWebhookDelivery } from '@/lib/monitors/discord';
 import type { AppSettings } from '@/lib/storage';
 
@@ -53,11 +51,10 @@ export function DiscordSettings({ settings, onChange, disabled, idPrefix }: Disc
   }
 
   return (
-    <SettingsSection title="Discord">
+    <div>
       <SettingRow
         id={`${idPrefix}-discord-enabled`}
-        label="Discord alerts"
-        description="Send monitor alerts to a Discord channel."
+        label="Discord"
         checked={settings.discordEnabled}
         disabled={disabled}
         onCheckedChange={(checked) => {
@@ -66,47 +63,40 @@ export function DiscordSettings({ settings, onChange, disabled, idPrefix }: Disc
         }}
       />
       {settings.discordEnabled && (
-        <div className="flex flex-col gap-2 px-3 py-2.5">
-          <Label htmlFor={`${idPrefix}-discord-url`} className="text-[13px] font-normal leading-tight">
-            Webhook URL
-          </Label>
+        <div className="flex flex-col gap-2 border-t border-border/50 bg-muted/20 px-3.5 py-2.5">
           <div className="flex items-center gap-2">
             <Input
               id={`${idPrefix}-discord-url`}
               type="url"
               inputMode="url"
-              placeholder="https://discord.com/api/webhooks/…"
+              placeholder="Webhook URL (https://discord.com/api/...)"
               value={settings.discordWebhookUrl}
               disabled={disabled}
               onChange={(e) => {
                 setTestState('idle');
                 void onChange({ ...settings, discordWebhookUrl: e.target.value });
               }}
-              className="h-7 text-[12.5px]"
+              className="h-7 bg-background text-xs"
             />
             <Button
               size="sm"
               variant="outline"
-              className="h-7 shrink-0 text-xs"
+              className="h-7 shrink-0 px-2.5 text-xs font-normal"
               disabled={disabled || !isValidDiscordWebhookUrl(settings.discordWebhookUrl) || testState === 'sending'}
               onClick={handleTest}
             >
-              {testState === 'sending' ? 'Sending…' : 'Test'}
+              {testState === 'sending' ? 'Sending…' : testState === 'sent' ? 'Sent ✓' : 'Test'}
             </Button>
           </div>
           {!urlValid ? (
-            <p className="text-[11.5px] leading-snug text-destructive">Enter a valid Discord webhook URL.</p>
+            <p className="text-[11px] text-destructive">Enter a valid Discord webhook URL.</p>
           ) : testState === 'sent' ? (
-            <p className="text-[11.5px] leading-snug text-muted-foreground">Test delivered.</p>
+            <p className="text-[11px] text-muted-foreground">Test alert delivered to channel.</p>
           ) : testState === 'failed' ? (
-            <p className="text-[11.5px] leading-snug text-destructive">Test failed. Check the URL and try again.</p>
-          ) : (
-            <p className="text-[11.5px] leading-snug text-muted-foreground">
-              Alerts are sent as channel messages and never block checks.
-            </p>
-          )}
+            <p className="text-[11px] text-destructive">Delivery failed. Check the webhook URL.</p>
+          ) : null}
         </div>
       )}
-    </SettingsSection>
+    </div>
   );
 }

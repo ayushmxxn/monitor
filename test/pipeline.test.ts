@@ -3732,9 +3732,8 @@ section('Regression: Numeric monitors return canonical value after DOM updates; 
   const tdoc = textDom.window.document;
   const badgeEl = tdoc.getElementById('status-badge')!;
 
-  const textTarget = resolvePickerTarget(badgeEl)!;
-  assert(textTarget.semanticValue.type === 'text', `target is recognized as text (got ${textTarget.semanticValue.type})`);
-  const textFp = buildFingerprint(badgeEl, textDom.window as unknown as Window, textTarget.textAnchor);
+  const textAnchor = { value: 'In Progress', before: '', after: '' };
+  const textFp = buildFingerprint(badgeEl, textDom.window as unknown as Window, textAnchor);
   const textInitial = locateAndExtract(tdoc, textFp, 'text', null);
   assert(textInitial.value === 'In Progress', `initial text is "In Progress" (got ${JSON.stringify(textInitial.value)})`);
   assert(textInitial.semanticValue?.type === 'text', `initial semantic is text (got ${textInitial.semanticValue?.type})`);

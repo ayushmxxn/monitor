@@ -1,6 +1,7 @@
 import { Button } from '@/components/ui/button';
 import { SettingRow, SettingSelectRow, SettingLinkRow, SettingActionRow } from '@/components/settings/SettingRow';
 import { SettingsSection } from '@/components/settings/SettingsSection';
+import { SocialLinks } from '@/components/layout/SocialLinks';
 import { WebhookSettings } from '@/components/settings/WebhookSettings';
 import { DiscordSettings } from '@/components/settings/DiscordSettings';
 import { TelegramSettings } from '@/components/settings/TelegramSettings';
@@ -28,16 +29,8 @@ export function PanelSettings() {
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-5 pb-4">
       <SettingsSection title="General">
-        <SettingRow
-          id="panel-notifications"
-          label="Notifications"
-          description="Show a system notification for future monitor alerts."
-          checked={settings.notificationsEnabled}
-          disabled={isSettingsLoading}
-          onCheckedChange={(checked) => setSettings({ ...settings, notificationsEnabled: checked })}
-        />
         <SettingSelectRow
           id="panel-default-interval"
           label="Check interval"
@@ -51,8 +44,7 @@ export function PanelSettings() {
         />
         <SettingSelectRow
           id="panel-theme"
-          label="Theme"
-          description="Choose the appearance used throughout Monitor."
+          label="Appearance"
           value={settings.theme}
           disabled={isSettingsLoading}
           options={[
@@ -63,31 +55,45 @@ export function PanelSettings() {
         />
       </SettingsSection>
 
-      <WebhookSettings
-        settings={settings}
-        onChange={setSettings}
-        disabled={isSettingsLoading}
-        idPrefix="panel"
-      />
+      <SettingsSection title="Notifications & Alerts">
+        <SettingRow
+          id="panel-notifications"
+          label="System notifications"
+          checked={settings.notificationsEnabled}
+          disabled={isSettingsLoading}
+          onCheckedChange={(checked) => setSettings({ ...settings, notificationsEnabled: checked })}
+        />
+        <SettingRow
+          id="panel-sound"
+          label="Sound"
+          checked={settings.soundEnabled}
+          disabled={isSettingsLoading}
+          onCheckedChange={(checked) => setSettings({ ...settings, soundEnabled: checked })}
+        />
+        <DiscordSettings
+          settings={settings}
+          onChange={setSettings}
+          disabled={isSettingsLoading}
+          idPrefix="panel"
+        />
+        <TelegramSettings
+          settings={settings}
+          onChange={setSettings}
+          disabled={isSettingsLoading}
+          idPrefix="panel"
+        />
+        <WebhookSettings
+          settings={settings}
+          onChange={setSettings}
+          disabled={isSettingsLoading}
+          idPrefix="panel"
+        />
+      </SettingsSection>
 
-      <DiscordSettings
-        settings={settings}
-        onChange={setSettings}
-        disabled={isSettingsLoading}
-        idPrefix="panel"
-      />
-
-      <TelegramSettings
-        settings={settings}
-        onChange={setSettings}
-        disabled={isSettingsLoading}
-        idPrefix="panel"
-      />
-
-      <SettingsSection title="Data">
+      <SettingsSection title="Advanced">
         <SettingActionRow
           label="Clear all monitors"
-          description="Permanently removes every monitor and its check history."
+          description="Delete all monitors and historical checks."
           action={
             <ClearAllMonitorsDialog
               monitorCount={monitors.length}
@@ -107,9 +113,10 @@ export function PanelSettings() {
         />
       </SettingsSection>
 
-      <SettingsSection title="Feedback">
+      <SettingsSection title="About & Feedback">
         <SettingLinkRow label="Send feedback" href={FEEDBACK_URL} />
         <SettingLinkRow label="Rate Monitor" href={getWebStoreUrl()} />
+        <SettingActionRow label="Socials" action={<SocialLinks />} />
       </SettingsSection>
     </div>
   );

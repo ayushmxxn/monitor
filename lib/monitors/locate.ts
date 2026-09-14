@@ -1,5 +1,6 @@
 import { locateElementWithRanking, rankRecoveryCandidates, buildFingerprint, buildReanchorFingerprint, normalizeText, isEffectivelyEmpty, isVisuallyHidden, extractVisibleText, type ElementFingerprint, type TextAnchor } from './fingerprint';
 import { detectAntiAutomation, detectAuthWall } from './antiAutomation';
+import { detectAccessChange } from './accessChange';
 import { diagnostic, STALE_IDENTITY_CODES, type Diagnostic, type DiagnosticCode } from './diagnostics';
 import { isSameCanonicalCheckUrl } from './itemUrl';
 import { withExponentialBackoff, sleep, type ReadinessResult } from './readiness';
@@ -221,6 +222,14 @@ function isValueConsistent(fp: ElementFingerprint, lastValue: string): boolean {
  * once with a re-anchor fingerprint rebuilt from the monitor's last
  * known good value (see `buildReanchorFingerprint`).
  *
+ * One earlier short-circuit: when the failure looks like an
+ * account/session scope change instead of drift (see
+ * `detectAccessChange` in `accessChange.ts`), the wrapper returns
+ * `ACCESS_CHANGED` with no heal and no re-anchor attempt — healing
+ * against a different account's page would corrupt the stored
+ * fingerprint, which must stay intact so returning to the original
+ * account recovers automatically.
+ *
  * Correctness properties, all enforced by construction rather than
  * convention:
  * - Healthy and new monitors are unaffected: a primary success
@@ -253,6 +262,30 @@ export function locateAndExtractWithReanchor(
   if (!STALE_IDENTITY_CODES.has(primary.diagnostic.code as DiagnosticCode)) return primary;
   if (!reanchorLastValue || isEffectivelyEmpty(reanchorLastValue) || isPlaceholderValue(reanchorLastValue)) {
     return primary;
+  }
+  // Account/session scope change, not selector drift: the page is
+  // reachable and rendered, but none of the monitor's captured context
+  // (or explicit access messaging) belongs to this session's data —
+  // e.g. the user switched accounts or workspaces since the pick.
+  // Diagnose it as an access problem instead of NEEDS_REPICK, and
+  // crucially do NOT re-anchor or heal here: rebuilding value memory
+  // against a different account's page could lock the fingerprint onto
+  // wrong data. The stored fingerprint is returned untouched, so going
+  // back to the original account recovers automatically on retry.
+  const accessChange = detectAccessChange(doc, fp);
+  if (accessChange.detected) {
+    const trace = primary.diagnostic.detail ?? primary.diagnostic.code;
+    return {
+      value: null,
+      diagnostic: diagnostic(
+        'ACCESS_CHANGED',
+        `${accessChange.reason}; last identity trace: ${trace}`,
+      ),
+      updatedFingerprint: null,
+      confidence: 0,
+      method: primary.method,
+      semanticValue: null,
+    };
   }
   if (isValueConsistent(fp, reanchorLastValue)) return primary;
   const derived = buildReanchorFingerprint(fp, reanchorLastValue);
