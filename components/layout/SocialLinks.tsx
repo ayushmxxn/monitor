@@ -15,7 +15,7 @@ export function SocialLinks() {
         rel="noopener noreferrer"
         aria-label="X"
         title="X"
-        className="rounded p-1 text-foreground transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="rounded p-1 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <svg
           aria-hidden
@@ -32,7 +32,7 @@ export function SocialLinks() {
         rel="noopener noreferrer"
         aria-label="Discord"
         title="Discord"
-        className="rounded p-1 text-[#5865F2] transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="rounded p-1 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <svg
           aria-hidden
