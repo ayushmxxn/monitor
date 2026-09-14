@@ -113,6 +113,38 @@ export async function runCheck(monitor: Monitor): Promise<void> {
   for (const strategyId of order) {
     const outcome = await runStrategy(strategyId, monitor);
     if (isValidOutcome(outcome)) {
+      // Fresh-monitor zero confirmation (see `needsZeroConfirmation`):
+      // a first-ever reading of exact numeric zero is re-read once
+      // through the same strategy before anything is committed, so a
+      // transient zero render is never stored as the monitor's first
+      // value. Every other check flows through untouched below.
+      if (needsZeroConfirmation(monitor, outcome)) {
+        const second = await runStrategy(strategyId, monitor);
+        if (isValidOutcome(second)) {
+          // Non-zero or repeat zero: commit the second reading normally
+          // (a repeat zero on a still-fresh monitor is a genuine zero).
+          await recordSuccess(monitor, strategyId, second);
+          return;
+        }
+        // Confirmation failed: commit nothing, keep the monitor fresh,
+        // and record it as an ordinary failure so the next scheduled
+        // check retries. The discarded zero never reaches history,
+        // stats, or counters. Final writes re-gate deleted/disabled
+        // state inside `recordFailure`, same as every other check.
+        await recordFailure(
+          monitor,
+          [
+            {
+              ...second.diagnostic,
+              detail: second.diagnostic.detail
+                ? `${strategyId}: ${second.diagnostic.detail}`
+                : `${strategyId} strategy`,
+            },
+          ],
+          strategyId,
+        );
+        return;
+      }
       await recordSuccess(monitor, strategyId, outcome);
       return;
     }
@@ -153,6 +185,24 @@ function orderedStrategies(persisted: MonitorCheckStrategy | null, monitor: Moni
   const base = baseStrategyOrder(monitor.fingerprint);
   if (!persisted) return base;
   return [persisted, ...base.filter((id) => id !== persisted)];
+}
+
+/**
+ * Whether a valid reading needs the fresh-monitor zero confirmation:
+ * all three must hold — no prior committed value (`lastValue === null`
+ * is exact: only a successful commit ever leaves null, and "current
+ * value happens to be 0" is deliberately NOT the signal so established
+ * zero-tracking monitors never enter this flow), a numeric reading
+ * (text monitors never enter), and an exact numeric zero (covers -0).
+ * Pure so tests pin the predicate directly.
+ */
+export function needsZeroConfirmation(
+  monitor: Pick<Monitor, 'lastValue'>,
+  outcome: Pick<StrategyOutcome, 'semanticValue'>,
+): boolean {
+  if (monitor.lastValue !== null) return false;
+  if (!outcome.semanticValue || outcome.semanticValue.type === 'text') return false;
+  return outcome.semanticValue.normalized === 0;
 }
 
 /** Decides whether the persisted strategy should be distrusted and re-cascaded this check. */
