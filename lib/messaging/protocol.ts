@@ -102,6 +102,12 @@ export interface ParseHtmlInput {
   fingerprint: ElementFingerprint;
   extractMode: "text" | "attribute";
   attributeName: string | null;
+  /**
+   * Last known good value for value-anchored re-anchor retries (see
+   * `locateAndExtractWithReanchor`). Optional so older callers keep
+   * working; absent means "no re-anchor" and behavior is unchanged.
+   */
+  reanchorLastValue?: string | null;
 }
 
 export interface ParseHtmlResult {

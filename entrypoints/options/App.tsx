@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { CreatorCredit } from "@/components/layout/CreatorCredit";
 import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { Header } from "@/components/layout/Header";
@@ -37,6 +38,10 @@ function OptionsContent() {
   const [settings, setSettings, isLoading] = useStorage(settingsItem);
   const [monitors] = useStorage(monitorsItem);
   const { appInfo } = useAppInfo();
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", settings.theme === "dark");
+  }, [settings.theme]);
 
   async function handleIntervalChange(minutes: number) {
     const saved = await setSettings({ ...settings, defaultIntervalMinutes: minutes });

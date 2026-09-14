@@ -1,6 +1,6 @@
 import { onMessage } from '@/lib/messaging';
 import type { ParseHtmlResult } from '@/lib/messaging';
-import { locateAndExtract } from '@/lib/monitors/locate';
+import { locateAndExtractWithReanchor } from '@/lib/monitors/locate';
 
 /**
  * The offscreen document is the only extension context with a real DOM
@@ -15,7 +15,14 @@ import { locateAndExtract } from '@/lib/monitors/locate';
 onMessage('parseHtml', ({ data }): ParseHtmlResult => {
   const parser = new DOMParser();
   const doc = parser.parseFromString(data.html, 'text/html');
-  const result = locateAndExtract(doc, data.fingerprint, data.extractMode, data.attributeName);
+  const result = locateAndExtractWithReanchor(
+    doc,
+    data.fingerprint,
+    data.extractMode,
+    data.attributeName,
+    undefined,
+    data.reanchorLastValue ?? null,
+  );
   return {
     value: result.value,
     diagnostic: result.diagnostic,

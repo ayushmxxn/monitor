@@ -74,6 +74,10 @@ export const fetchStrategy: CheckStrategy = {
         fingerprint: monitor.fingerprint,
         extractMode: monitor.extractMode,
         attributeName: monitor.attributeName,
+        // Lets a stale stored fingerprint re-anchor from the last known
+        // good value inside the same parse; absent/never-checked means
+        // the plain pipeline runs exactly as before.
+        reanchorLastValue: monitor.lastValue,
       });
       return result;
     } catch (error) {

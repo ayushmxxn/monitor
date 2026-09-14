@@ -173,6 +173,7 @@ export async function locateOnTab(
   extractMode: "text" | "attribute",
   attributeName: string | null,
   maxTotalWaitMs: number,
+  reanchorLastValue?: string | null,
 ): Promise<LiveLocateOutcome> {
   // Both the file injection and the follow-up `func` call are made
   // inside the *same* retry attempt — if a frame-replacement race hits
@@ -189,6 +190,7 @@ export async function locateOnTab(
         mode: "text" | "attribute",
         attrName: string | null,
         waitMs: number,
+        reanchor: string | null,
       ) => {
         const win = window as unknown as {
           __monitorPageAgent?: {
@@ -210,6 +212,7 @@ export async function locateOnTab(
         }
         return win.__monitorPageAgent.locate(fpJson, mode, attrName, {
           maxTotalWaitMs: waitMs,
+          reanchorLastValue: reanchor,
         });
       },
       args: [
@@ -217,6 +220,7 @@ export async function locateOnTab(
         extractMode,
         attributeName,
         maxTotalWaitMs,
+        reanchorLastValue ?? null,
       ],
     });
     return injection;

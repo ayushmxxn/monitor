@@ -134,4 +134,91 @@ section('M4: card freshness stays honest across temporary failures');
   c.remove();
 }
 
+section('M5: home card renders the canonical value exactly as the detail view');
+
+{
+  // Production mismatch: a check storing lastValue "1,651" showed
+  // "1.7k" on the home card while the detail view showed "1,651" for
+  // the same check. Root cause was presentational, not state: the card
+  // passed lastValue through lossy adaptive compaction
+  // (formatAdaptiveValue: 1651 -> "1.7k") while the detail view renders
+  // the raw canonical lastValue. Same stored value, same timestamp —
+  // two different strings. The card now renders the raw lastValue, so
+  // both surfaces always agree; formatting rules themselves
+  // (lib/monitors/formatValue.ts) are untouched.
+  setupDom();
+  const m = seedMonitor({
+    id: 'm5-1',
+    name: 'M5 Monitor',
+    lastValue: '1,651',
+    lastSemanticValue: { type: 'number', normalized: 1651, unit: null, raw: '1,651' },
+    lastStatus: 'unchanged',
+    lastCheckedAt: Date.now(),
+  });
+  const c = document.createElement('div');
+  document.body.appendChild(c);
+  const r = createRoot(c);
+  await act(async () => {
+    r.render(<MonitorCard monitor={m} onDelete={async () => true} onOpen={() => {}} />);
+  });
+
+  const counter = () => c.querySelector('.t-counter');
+  assert(counter() !== null, 'card renders the value counter');
+  assert(
+    counter()?.textContent === '1,651',
+    `card shows the canonical "1,651", not the compacted "1.7k" (got "${counter()?.textContent}")`,
+  );
+  assert(
+    (counter()?.textContent ?? '').includes('1.7k') === false,
+    'card never shows lossy compact form of the current value',
+  );
+
+  // A completed check with a new value flows straight through: update
+  // both value and timestamp (as recordSuccess does atomically), let
+  // the spin settle, and the exact new value must be showing.
+  await act(async () => {
+    r.render(
+      <MonitorCard
+        monitor={{ ...m, lastValue: '1,652', lastCheckedAt: Date.now() }}
+        onDelete={async () => true}
+        onOpen={() => {}}
+      />,
+    );
+  });
+  await act(async () => {
+    await sleep(2100);
+  });
+  assert(
+    counter()?.textContent === '1,652',
+    `card settles on the exact updated value after a check (got "${counter()?.textContent}")`,
+  );
+
+  // Navigation/reload (same state, fresh mount, no new check): the
+  // canonical value renders immediately with no animation dependency.
+  await act(async () => {
+    r.unmount();
+  });
+  c.remove();
+  const c2 = document.createElement('div');
+  document.body.appendChild(c2);
+  const r2 = createRoot(c2);
+  await act(async () => {
+    r2.render(
+      <MonitorCard
+        monitor={{ ...m, lastValue: '1,652' }}
+        onDelete={async () => true}
+        onOpen={() => {}}
+      />,
+    );
+  });
+  assert(
+    c2.querySelector('.t-counter')?.textContent === '1,652',
+    `fresh mount (reload) shows the canonical value immediately (got "${c2.querySelector('.t-counter')?.textContent}")`,
+  );
+  await act(async () => {
+    r2.unmount();
+  });
+  c2.remove();
+}
+
 console.log('\nAll card freshness tests finished.');

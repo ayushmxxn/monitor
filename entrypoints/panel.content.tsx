@@ -1,5 +1,6 @@
 import { createRoot, type Root } from 'react-dom/client';
 import { Panel, type PanelHandle } from '@/components/panel/Panel';
+import { applyShadowHostIsolation } from '@/lib/ui/shadowHost';
 import { onMessage } from '@/lib/messaging';
 import { EXTENSION_INVALIDATED_EVENT } from '@/hooks/useExtensionInvalidated';
 // `?inline` bundles the compiled CSS as a plain string at build time
@@ -81,6 +82,7 @@ export default defineContentScript({
               handle = instance;
             }}
             shadowHost={shadowHost}
+            shadowContainer={container}
           />,
         );
         return root;
@@ -108,16 +110,11 @@ export default defineContentScript({
     // the host element itself should never take up any page space -
     // pin that down explicitly instead of leaving it to chance. This
     // mirrors what WXT applies automatically for its 'overlay'/'modal'
-    // positions; 'inline' just doesn't get it for free.
-    const hostStyle = ui.shadowHost.style;
-    hostStyle.setProperty('all', 'initial', 'important');
-    hostStyle.setProperty('display', 'block', 'important');
-    hostStyle.setProperty('position', 'static', 'important');
-    hostStyle.setProperty('width', '0', 'important');
-    hostStyle.setProperty('height', '0', 'important');
-    hostStyle.setProperty('margin', '0', 'important');
-    hostStyle.setProperty('padding', '0', 'important');
-    hostStyle.setProperty('overflow', 'visible', 'important');
+    // positions; 'inline' just doesn't get it for free. The exact
+    // declarations (plus the design font pin) live in
+    // lib/ui/shadowHost.ts so they are unit-testable - see
+    // test/fontIsolation.test.ts.
+    applyShadowHostIsolation(ui.shadowHost);
 
     // Promote the shadow host into the browser's top layer via the
     // Popover API, instead of leaving it as an ordinary node at the

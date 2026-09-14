@@ -78,9 +78,18 @@ export interface PanelProps {
    * doesn't work for that.
    */
   shadowHost: HTMLElement;
+  /**
+   * The root container inside the shadow root (the shadow body).
+   * Provided so portaled elements (like dialogs) have a guaranteed target
+   * inside the shadow tree immediately on mount.
+   */
+  shadowContainer?: HTMLElement;
 }
 
-export const Panel = forwardRef<PanelHandle, PanelProps>(function Panel({ shadowHost }, ref) {
+export const Panel = forwardRef<PanelHandle, PanelProps>(function Panel(
+  { shadowHost, shadowContainer },
+  ref,
+) {
   const [isOpen, setIsOpen] = useState(true);
 
   useEffect(() => {
@@ -108,6 +117,7 @@ export const Panel = forwardRef<PanelHandle, PanelProps>(function Panel({ shadow
         onClose={handleClose}
         onOpen={handleOpen}
         shadowHost={shadowHost}
+        shadowContainer={shadowContainer}
       />
     </ErrorBoundary>
   );
@@ -296,11 +306,13 @@ function PanelContent({
   onClose,
   onOpen,
   shadowHost,
+  shadowContainer,
 }: {
   isOpen: boolean;
   onClose: () => void;
   onOpen: () => void;
   shadowHost: HTMLElement;
+  shadowContainer?: HTMLElement;
 }) {
   const { monitors, isLoading, error, remove } = useMonitors();
   const isInvalidated = useExtensionInvalidated();
@@ -487,12 +499,17 @@ function PanelContent({
   }
 
   return (
-    <PortalContainerContext.Provider value={panelEl}>
+    <PortalContainerContext.Provider value={panelEl ?? shadowContainer ?? null}>
     <div
       ref={setPanelEl}
-      style={{ width: liveWidth, fontSize: '16px', transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)' }}
+      style={{
+        width: liveWidth,
+        fontSize: '16px',
+        transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
+        colorScheme: settings.theme === 'dark' ? 'dark' : 'light',
+      }}
       className={cn(
-        'pointer-events-auto fixed top-5 bottom-5 right-5 z-[2147483647] flex overflow-hidden rounded-xl',
+        'pointer-events-auto fixed top-5 bottom-5 right-5 z-[2147483647] flex overflow-hidden rounded-xl font-sans',
         // No `border-l`: the resize handle already renders its own
         // hairline on the left edge (see the separator below), so a
         // full `border` here would double it up as two adjacent lines.

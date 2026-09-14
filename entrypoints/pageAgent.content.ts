@@ -6,7 +6,7 @@ import {
 } from "@/lib/monitors/fingerprint";
 import { resolveSourceUrl } from "@/lib/monitors/itemUrl";
 import {
-  locateAndExtract,
+  locateAndExtractWithReanchor,
   resolveSettledValue,
   type LocateAndExtractResult,
 } from "@/lib/monitors/locate";
@@ -38,6 +38,12 @@ export interface PickResult {
 
 export interface PageAgentLocateOptions {
   maxTotalWaitMs?: number;
+  /**
+   * Last known good value for value-anchored re-anchor retries (see
+   * `locateAndExtractWithReanchor`). Optional; absent means the plain
+   * pipeline runs exactly as before (new/healthy monitors).
+   */
+  reanchorLastValue?: string | null;
 }
 
 export interface PageAgentLocateResponse {
@@ -152,12 +158,13 @@ export async function runLocate(
     : totalBudgetMs;
 
   const read = (): LocateAndExtractResult => {
-    const result = locateAndExtract(
+    const result = locateAndExtractWithReanchor(
       document,
       fp,
       extractMode,
       attributeName,
       window,
+      options?.reanchorLastValue ?? null,
     );
     // Self-heal the working fingerprint across retries too, not just
     // on the final accepted result - otherwise a relocation found on

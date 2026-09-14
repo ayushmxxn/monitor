@@ -477,8 +477,9 @@ function findNumericCandidates(
     addCandidate(pMatch[1], pMatch.index, pMatch.index + pMatch[1].length, 50, 'percentage');
   }
 
-  // 3. Scaled counts
-  const scaledRegex = /\b(-?[\d,]+(?:\.\d+)?\s*(?:k|mm|m|bn|b|t))\b/gi;
+  // 3. Scaled counts (suffix letters and English magnitude words alike,
+  // so word-form accessibility labels tokenize the same way checks do).
+  const scaledRegex = /\b(-?[\d,]+(?:\.\d+)?\s*(?:k|mm|m|bn|b|t|thousands?|millions?|billions?|trillions?))\b/gi;
   let sMatch: RegExpExecArray | null;
   while ((sMatch = scaledRegex.exec(text)) !== null) {
     addCandidate(sMatch[1], sMatch.index, sMatch.index + sMatch[1].length, 45, 'count');

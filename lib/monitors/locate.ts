@@ -1,8 +1,8 @@
-import { locateElement, buildFingerprint, normalizeText, isEffectivelyEmpty, isVisuallyHidden, extractVisibleText, type ElementFingerprint, type TextAnchor } from './fingerprint';
+import { locateElementWithRanking, rankRecoveryCandidates, buildFingerprint, buildReanchorFingerprint, normalizeText, isEffectivelyEmpty, isVisuallyHidden, extractVisibleText, type ElementFingerprint, type TextAnchor } from './fingerprint';
 import { detectAntiAutomation, detectAuthWall } from './antiAutomation';
-import { diagnostic, type Diagnostic } from './diagnostics';
+import { diagnostic, STALE_IDENTITY_CODES, type Diagnostic, type DiagnosticCode } from './diagnostics';
 import { withExponentialBackoff, sleep, type ReadinessResult } from './readiness';
-import { detectSemanticValue, extractNumericToken, CURRENCY_SYMBOLS, CURRENCY_CODES, type SemanticValue, type SemanticValueType } from './semanticValue';
+import { detectSemanticValue, extractNumericToken, isCompatibleSemanticKind, CURRENCY_SYMBOLS, CURRENCY_CODES, type SemanticValue, type SemanticValueType } from './semanticValue';
 
 export interface LocateAndExtractResult {
   value: string | null;
@@ -39,7 +39,17 @@ export function locateAndExtract(
   attributeName: string | null,
   win?: Window,
 ): LocateAndExtractResult {
-  const result = locateElement(fp, doc, { acceptThreshold: ACCEPT_THRESHOLD });
+  // Single scan: one gather+score pass yields both the locate verdict
+  // and the ranked fallback list, so a recovery read never pays for
+  // the same scan twice (Check Now stays fast; no timeout is raised).
+  // The monitored attribute (attribute mode only) is threaded into the
+  // scan so the empty-candidate guard judges emptiness on the value
+  // source actually being read, not just rendered text.
+  const scanAttributeName = extractMode === 'attribute' ? attributeName : null;
+  const { locate: result, ranked } = locateElementWithRanking(fp, doc, {
+    acceptThreshold: ACCEPT_THRESHOLD,
+    attributeName: scanAttributeName,
+  });
 
   if (!result.element) {
     const antiAutomation = detectAntiAutomation(doc);
@@ -92,7 +102,187 @@ export function locateAndExtract(
     };
   }
 
-  const element = result.element;
+  const wasExactMatch = result.method.startsWith('fast-path');
+  // Recovery-scan fallback: the single best structural match may hold
+  // no value yet (a loading skeleton) while a slightly lower-ranked
+  // candidate already holds the real one. Try ranked candidates in
+  // order — all scored by the same combined bundle (semantic type,
+  // nearby labels/context, stable attributes, anchor text, structure)
+  // — and take the first that yields a non-empty, kind-consistent
+  // value. (An exact match that itself comes back empty takes the same
+  // fallback via `attemptFastPathFallback` below rather than locking
+  // onto its one slot.)
+  if (!wasExactMatch) {
+    const list = ranked.length > 0
+      ? ranked
+      : [{ element: result.element, score: result.score, signals: result.signals }];
+    let sawEmpty = false;
+    let mismatchDetail: string | null = null;
+    for (const cand of list) {
+      const attempt = attemptExtraction(cand.element, cand.score, result.method, fp, extractMode, attributeName, win, false);
+      if (attempt.value !== null) return attempt;
+      if (attempt.diagnostic.code === 'EXTRACTION_EMPTY') sawEmpty = true;
+      if (attempt.diagnostic.code === 'SELECTOR_RECOVERY_LOW_CONFIDENCE' && attempt.diagnostic.detail) {
+        mismatchDetail = attempt.diagnostic.detail;
+      }
+    }
+    if (sawEmpty) {
+      return {
+        value: null,
+        diagnostic: diagnostic('EXTRACTION_EMPTY'),
+        updatedFingerprint: null,
+        confidence: result.score,
+        method: result.method,
+        semanticValue: null,
+      };
+    }
+    return {
+      value: null,
+      diagnostic: diagnostic(
+        'SELECTOR_RECOVERY_LOW_CONFIDENCE',
+        mismatchDetail ?? `best candidate scored ${result.score}/100 across ${result.candidatesConsidered} elements considered; needs ${ACCEPT_THRESHOLD}`,
+      ),
+      updatedFingerprint: null,
+      confidence: result.score,
+      method: result.method,
+      semanticValue: null,
+    };
+  }
+
+  const exact = attemptExtraction(result.element, result.score, result.method, fp, extractMode, attributeName, win, true);
+  if (exact.value !== null) return exact;
+  // The exact slot resolved but holds no usable value. Historically
+  // this locked the check onto that one slot (`EXTRACTION_EMPTY` from
+  // the pin-pointed element, retry only via the outer settle loop) —
+  // which strands virtualized/recycled pages where the selector still
+  // resolves yet the value has moved on. Fall back to the same bounded
+  // ranked recovery instead; on total failure the honest exact
+  // diagnostic is preserved (never healed, last value kept).
+  const recovered = attemptFastPathFallback(doc, fp, result.element, extractMode, attributeName, win);
+  return recovered ?? exact;
+}
+
+/**
+ * True when the stored fingerprint's value memory already agrees with
+ * `lastValue` — snapshot and anchor value both match — so a re-anchor
+ * attempt would score identically to the primary one just run. Skips
+ * the redundant second scan; the primary verdict stands.
+ */
+function isValueConsistent(fp: ElementFingerprint, lastValue: string): boolean {
+  if (fp.textSnapshot !== lastValue) return false;
+  const anchorValue = fp.textAnchor?.value ?? null;
+  if (anchorValue !== null && anchorValue !== lastValue) return false;
+  return true;
+}
+
+/**
+ * Value-anchored re-location for existing monitors whose stored
+ * fingerprint has gone stale or was corrupted (e.g. healed onto a
+ * neighboring element before the kind gates existed): runs the
+ * standard `locateAndExtract` pipeline first, untouched, and only when
+ * that fails on identity grounds (not found / low confidence / empty —
+ * never auth, anti-automation, or other page-state failures) retries
+ * once with a re-anchor fingerprint rebuilt from the monitor's last
+ * known good value (see `buildReanchorFingerprint`).
+ *
+ * Correctness properties, all enforced by construction rather than
+ * convention:
+ * - Healthy and new monitors are unaffected: a primary success
+ *   returns immediately (the derived code never runs), and a `null`
+ *   `lastValue` (never successfully checked) skips the attempt.
+ * - The retry uses the identical pipeline — same acceptance
+ *   threshold, same kind/sign/frame-echo gates, same ambiguity rule —
+ *   so it can only succeed where the standard strictness is met.
+ * - A retry success heals forward (the fresh fingerprint, falling
+ *   back to the corrected value memory itself when the read landed on
+ *   an unchanged exact slot that yields no structural heal), so the
+ *   monitor converges instead of re-anchoring forever.
+ * - Any retry failure returns the *primary* failure untouched, with no
+ *   heal and no semantic value — the caller preserves the last known
+ *   value exactly as before.
+ * - Bounded: at most two locate passes per read, both over the
+ *   already-loaded document. No waiting, no timeout changes.
+ */
+export function locateAndExtractWithReanchor(
+  doc: Document,
+  fp: ElementFingerprint,
+  extractMode: 'text' | 'attribute',
+  attributeName: string | null,
+  win: Window | undefined,
+  reanchorLastValue: string | null | undefined,
+): LocateAndExtractResult {
+  const primary = locateAndExtract(doc, fp, extractMode, attributeName, win);
+  if (primary.value !== null) return primary;
+  if (!STALE_IDENTITY_CODES.has(primary.diagnostic.code as DiagnosticCode)) return primary;
+  if (!reanchorLastValue || isEffectivelyEmpty(reanchorLastValue) || isPlaceholderValue(reanchorLastValue)) {
+    return primary;
+  }
+  if (isValueConsistent(fp, reanchorLastValue)) return primary;
+  const derived = buildReanchorFingerprint(fp, reanchorLastValue);
+  if (!derived) return primary;
+  const attempt = locateAndExtract(doc, derived, extractMode, attributeName, win);
+  if (attempt.value === null) return primary;
+  const baseDetail =
+    attempt.diagnostic.detail ?? `relocated with ${attempt.confidence}/100 confidence via ${attempt.method}`;
+  return {
+    value: attempt.value,
+    diagnostic: diagnostic(
+      'OK_RECOVERED',
+      `${baseDetail}; re-anchored from the last known value after the stored fingerprint stopped matching`,
+    ),
+    // A re-anchor that lands on an unchanged exact slot yields no
+    // structural heal of its own; persisting the corrected value
+    // memory itself still strictly dominates the corrupt stored
+    // fingerprint (same structure, honest value memory), so the next
+    // check starts from truth instead of re-anchoring forever.
+    updatedFingerprint: attempt.updatedFingerprint ?? derived,
+    confidence: attempt.confidence,
+    method: attempt.method,
+    semanticValue: attempt.semanticValue,
+  };
+}
+
+function attemptFastPathFallback(
+  doc: Document,
+  fp: ElementFingerprint,
+  exactElement: Element,
+  extractMode: 'text' | 'attribute',
+  attributeName: string | null,
+  win: Window | undefined,
+): LocateAndExtractResult | null {
+  // The exact selector resolved and scored well, but the slot holds no
+  // usable value (empty skeleton, or a frame-echo rejection): rather
+  // than locking onto that one slot, run the same bounded ranked
+  // recovery used for the recovery path — identical combined signal
+  // bundle, identical kind/sign gates (attempts run as non-exact, so
+  // they are strictly *more* demanding than the exact read that just
+  // failed). One extra scan, only on this failure path: the happy path
+  // still costs a single scan, so Check Now stays fast.
+  const fallback = rankRecoveryCandidates(fp, doc, {
+    acceptThreshold: ACCEPT_THRESHOLD,
+    attributeName: extractMode === 'attribute' ? attributeName : null,
+  });
+  for (const cand of fallback.ranked) {
+    if (cand.element === exactElement) continue; // already read above
+    // Labeled as a recovery-scan read (not the fast path that just
+    // failed), so the diagnostic honestly reports how the value was
+    // actually found.
+    const attempt = attemptExtraction(cand.element, cand.score, 'recovery-scan', fp, extractMode, attributeName, win, false);
+    if (attempt.value !== null) return attempt;
+  }
+  return null;
+}
+
+function attemptExtraction(
+  element: Element,
+  score: number,
+  method: string,
+  fp: ElementFingerprint,
+  extractMode: 'text' | 'attribute',
+  attributeName: string | null,
+  win: Window | undefined,
+  wasExactMatch: boolean,
+): LocateAndExtractResult {
   const extracted = extractValue(element, extractMode, attributeName, fp);
 
   const initialSemantic = extracted !== null ? detectSemanticValue(extracted) : null;
@@ -198,7 +388,6 @@ export function locateAndExtract(
     }
   }
 
-  const wasExactMatch = result.method.startsWith('fast-path');
   const updatedAnchor: TextAnchor | null = fp.textAnchor
     ? {
         value: value ?? fp.textAnchor.value,
@@ -209,31 +398,46 @@ export function locateAndExtract(
   const valueChanged =
     value !== null &&
     (value !== fp.textSnapshot || (fp.textAnchor?.value !== undefined && value !== fp.textAnchor.value));
-  const updatedFingerprint =
-    (!wasExactMatch && result.score >= ACCEPT_THRESHOLD) || (wasExactMatch && valueChanged)
+  const healedFingerprint =
+    (!wasExactMatch && score >= ACCEPT_THRESHOLD) || (wasExactMatch && valueChanged)
       ? buildFingerprint(element, win, updatedAnchor)
       : null;
 
   if (extracted === null || (isNumericMonitor && value === null)) {
+    // Never heal toward an empty read: the fingerprint must keep
+    // pointing at the last known good slot so the next retry (and the
+    // next check) re-resolves from proven identity signals instead of
+    // locking onto a skeleton/placeholder. The caller preserves the
+    // last known value; the outer settle loop retries the extraction
+    // itself rather than waiting on page-wide quiet.
     return {
       value: null,
       diagnostic: diagnostic('EXTRACTION_EMPTY'),
-      updatedFingerprint,
-      confidence: result.score,
-      method: result.method,
+      updatedFingerprint: null,
+      confidence: score,
+      method,
       semanticValue: null,
     };
   }
 
-  // A relocated element must yield the same KIND of value the monitor
-  // was picked for: recovery scores structure, not meaning, so without
-  // this a structurally identical neighbor (a delta like "+5.2%" next
-  // to a count like "20") can win and its value gets stored - and then
-  // self-healed onto, permanently hijacking the monitor. Exact matches
-  // are exempt (a page legitimately restyles its own value in place),
-  // as are text monitors (no kind to agree with). Rejection preserves
-  // the last value and retries instead of storing the wrong one - and
-  // crucially never heals toward the mismatched element.
+  // A monitor's value must keep the same KIND it was picked for:
+  // recovery scores structure, not meaning, so without this a
+  // structurally identical neighbor (a delta like "+5.2%" next to a
+  // count like "20") can win and its value gets stored - and then
+  // self-healed onto, permanently hijacking the monitor. Kinds compare
+  // by magnitude family, not exact equality (see
+  // `isCompatibleSemanticKind`): a bare "21k" (count) and its labeled
+  // renderings ("22 thousand subscribers", "22K views") are the same
+  // kind of value in different clothes — pickers canonicalize one way,
+  // live pages render the other — while percentages, currency,
+  // durations, and every other kind still require an exact match. A
+  // slot that used to hold a count but now holds a percentage is the
+  // page showing a neighboring change indicator, not the watched value
+  // restyled. Genuine in-place restyles keep a compatible kind
+  // ("$49.99" -> "$44.99", "147" -> "150") and are unaffected, as are
+  // text monitors (no kind to agree with). Rejection preserves the last
+  // value and retries instead of storing the wrong one - and crucially
+  // never heals toward the mismatched element.
   const anchorKind =
     anchorSemantic !== null &&
     anchorSemantic.type !== 'text' &&
@@ -247,38 +451,35 @@ export function locateAndExtract(
       ? resolvedSemantic.type
       : null;
   const kindMismatch =
-    !wasExactMatch &&
     value !== null &&
     anchorKind !== null &&
     resolvedKind !== null &&
-    anchorKind !== resolvedKind;
-  // Same kind but a different sign shape: the relocated slot now shows
-  // an explicitly signed value where the picked one was unsigned, or
-  // vice versa ("87%" -> "+5.2%"). On dashboards that shape is the
-  // change indicator next to the metric, not the metric itself - a
-  // relocated element showing it is far more likely a neighboring
-  // delta than the watched value with a genuinely flipped sign. The
-  // one exception is a candidate that still carries the anchor's full
-  // frame (every non-empty before/after part present): same slot,
+    !isCompatibleSemanticKind(anchorKind, resolvedKind);
+  // Same kind but a different sign shape: the slot now shows an
+  // explicitly signed value where the picked one was unsigned, or vice
+  // versa ("87%" -> "+5.2%"). On dashboards that shape is the change
+  // indicator next to the metric, not the metric itself - far more
+  // likely a neighboring delta than the watched value with a genuinely
+  // flipped sign, whether the slot was recovered or resolved exactly.
+  // The one exception is a candidate that still carries the anchor's
+  // full frame (every non-empty before/after part present): same slot,
   // same context, so a flipped sign there reads as a genuine update,
-  // not a switch to a nearby value. Exact matches are exempt entirely
-  // (a page legitimately restyles its own value in place).
+  // not a switch to a nearby value.
   const anchorSigned = hasExplicitSign(fp.textAnchor?.value ?? '');
   const resolvedSigned = value !== null ? hasExplicitSign(value) : false;
   const signMismatch =
-    !wasExactMatch &&
     value !== null &&
     anchorKind !== null &&
-    anchorKind === resolvedKind &&
+    resolvedKind !== null &&
+    isCompatibleSemanticKind(anchorKind, resolvedKind) &&
     anchorSigned !== resolvedSigned &&
     !hasFullFrameEvidence(fp.textAnchor, normalizeText(element.textContent ?? ''));
   // A reading that merely echoes the anchor's own frame (its before or
   // after context) without containing the anchored value is surrounding
   // context masquerading as the value - e.g. a slot now holding the old
-  // label or delta. Unlike kindMismatch this also applies to exact
-  // matches: positional certainty says *where*, but frame-echo says the
-  // slot no longer holds the metric, and storing context as a reading
-  // is never right.
+  // label or delta. Like kindMismatch above, positional certainty says
+  // *where*, but frame-echo says the slot no longer holds the metric,
+  // and storing context as a reading is never right.
   const frameEcho = value !== null && isFrameEcho(fp.textAnchor, value);
   if (kindMismatch || signMismatch || frameEcho) {
     const detail = kindMismatch
@@ -290,8 +491,8 @@ export function locateAndExtract(
       value: null,
       diagnostic: diagnostic('SELECTOR_RECOVERY_LOW_CONFIDENCE', detail),
       updatedFingerprint: null,
-      confidence: result.score,
-      method: result.method,
+      confidence: score,
+      method,
       semanticValue: null,
     };
   }
@@ -299,16 +500,16 @@ export function locateAndExtract(
   const code = wasExactMatch ? 'OK' : 'OK_RECOVERED';
   const detail = wasExactMatch
     ? undefined
-    : `relocated with ${result.score}/100 confidence via ${result.method}${
-        result.score >= HIGH_CONFIDENCE ? '' : ' (below high-confidence threshold, worth reviewing)'
+    : `relocated with ${score}/100 confidence via ${method}${
+        score >= HIGH_CONFIDENCE ? '' : ' (below high-confidence threshold, worth reviewing)'
       }`;
 
   return {
     value,
     diagnostic: diagnostic(code, detail),
-    updatedFingerprint,
-    confidence: result.score,
-    method: result.method,
+    updatedFingerprint: healedFingerprint,
+    confidence: score,
+    method,
     semanticValue: resolvedSemantic,
   };
 }
@@ -842,7 +1043,16 @@ export function resolveSettledValue(
       // elsewhere in the document. Readiness still protects against known
       // loading states and in-flight requests, but is kept as a short
       // sampling window; target-level confirmation below is the authority.
-      const readiness = await waitForReady(Math.min(remaining, attemptNumber === 0 ? 750 : 1_000));
+      // When the previous read already located the slot but found it
+      // empty, the element exists and only needs population — spending
+      // another full second waiting for page-wide quiet just burns the
+      // budget that should go to re-extracting the candidate itself.
+      // Use a short sampling wait there so the same time budget buys
+      // more extraction retries instead of longer waits (Check Now
+      // stays fast; no global timeout is raised).
+      const prevEmpty = lastResult?.diagnostic.code === 'EXTRACTION_EMPTY' && lastResult.value === null;
+      const waitCap = prevEmpty ? 250 : attemptNumber === 0 ? 750 : 1_000;
+      const readiness = await waitForReady(Math.min(remaining, waitCap));
       if (readiness.ready) everReady = true;
 
       // Read unconditionally - see the comment above `resolveSettledValue`

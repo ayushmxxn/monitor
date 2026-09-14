@@ -105,11 +105,34 @@ const SCALE_SUFFIXES: Record<string, number> = {
   b: 1_000_000_000,
   bn: 1_000_000_000,
   t: 1_000_000_000_000,
+  thousand: 1_000,
+  thousands: 1_000,
+  million: 1_000_000,
+  millions: 1_000_000,
+  billion: 1_000_000_000,
+  billions: 1_000_000_000,
+  trillion: 1_000_000_000_000,
+  trillions: 1_000_000_000_000,
 };
+
+/**
+ * Shared scale-suffix alternative for every magnitude regex in this
+ * module: K/M/B/T letters plus English magnitude words ("22 thousand
+ * subscribers", "1.2 million views" — the word form accessibility
+ * labels like YouTube's `aria-label` use instead of suffixes).
+ * Non-capturing, so interpolating it never shifts match-group indices.
+ * Words come before their single-letter prefixes (`t` in "thousand")
+ * so sites without a trailing boundary still match the full word
+ * instead of stopping after its first letter; at `\b`-terminated sites
+ * the order is irrelevant (only the full alternative can match).
+ */
+const SCALE_SUFFIX_SOURCE = '(?:thousands?|millions?|billions?|trillions?|k|mm|m|bn|b|t)';
 
 /** First numeric token in `text`, with an optional trailing K/M/B/T scale suffix expanded. */
 function parseScaledNumber(text: string): number | null {
-  const match = text.replace(/,/g, '').match(/(-?\d+(?:\.\d+)?)\s*(k|mm|m|bn|b|t)?\b/i);
+  const match = text
+    .replace(/,/g, '')
+    .match(new RegExp(`(-?\\d+(?:\\.\\d+)?)\\s*(${SCALE_SUFFIX_SOURCE})?\\b`, 'i'));
   if (!match) return null;
   const base = parseFloat(match[1]);
   if (Number.isNaN(base)) return null;
@@ -123,7 +146,7 @@ function detectCurrency(text: string): SemanticValue | null {
     if (text.includes(symbol)) {
       const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const prefixMatch = text.match(
-        new RegExp(`(?:^|[^\\w$])([-+]?\\s*${escaped}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?)\\b`, 'i'),
+        new RegExp(`(?:^|[^\\w$])([-+]?\\s*${escaped}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
       );
       if (prefixMatch) {
         const normalized = parseScaledNumber(prefixMatch[1].replace(symbol, ' '));
@@ -133,7 +156,7 @@ function detectCurrency(text: string): SemanticValue | null {
         }
       }
       const suffixMatch = text.match(
-        new RegExp(`(?:^|[^\\w$])([-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?\\s*${escaped})(?=[^\\w$]|$)`, 'i'),
+        new RegExp(`(?:^|[^\\w$])([-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?\\s*${escaped})(?=[^\\w$]|$)`, 'i'),
       );
       if (suffixMatch) {
         const normalized = parseScaledNumber(suffixMatch[1].replace(symbol, ' '));
@@ -155,7 +178,7 @@ function detectCurrency(text: string): SemanticValue | null {
   if (codeMatch && CURRENCY_CODES.has(codeMatch[1])) {
     const code = codeMatch[1];
     const prefixMatch = text.match(
-      new RegExp(`\\b(${code}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?)\\b`, 'i'),
+      new RegExp(`\\b(${code}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
     );
     if (prefixMatch) {
       const normalized = parseScaledNumber(prefixMatch[1].replace(code, ' '));
@@ -165,7 +188,7 @@ function detectCurrency(text: string): SemanticValue | null {
       }
     }
     const suffixMatch = text.match(
-      new RegExp(`\\b([-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?\\s*${code})\\b`, 'i'),
+      new RegExp(`\\b([-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?\\s*${code})\\b`, 'i'),
     );
     if (suffixMatch) {
       const normalized = parseScaledNumber(suffixMatch[1].replace(code, ' '));
@@ -306,7 +329,7 @@ function detectKeywordCount(
 ): SemanticValue | null {
   if (!keywords.test(text)) return null;
   const beforeMatch = text.match(
-    new RegExp(`(-?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?)\\s*(?:${keywords.source})\\b`, 'i'),
+    new RegExp(`(-?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\s*(?:${keywords.source})\\b`, 'i'),
   );
   if (beforeMatch) {
     const normalized = parseScaledNumber(beforeMatch[1]);
@@ -315,7 +338,7 @@ function detectKeywordCount(
     }
   }
   const afterMatch = text.match(
-    new RegExp(`(?:${keywords.source})[:\\s]+(-?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?)\\b`, 'i'),
+    new RegExp(`(?:${keywords.source})[:\\s]+(-?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
   );
   if (afterMatch) {
     const normalized = parseScaledNumber(afterMatch[afterMatch.length - 1]);
@@ -339,11 +362,11 @@ export function extractNumericToken(text: string, semantic?: SemanticValue): str
       if (text.includes(symbol)) {
         const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const prefixMatch = text.match(
-          new RegExp(`(?:^|[^\\w$])([-+]?\\s*${escaped}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?)\\b`, 'i'),
+          new RegExp(`(?:^|[^\\w$])([-+]?\\s*${escaped}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
         );
         if (prefixMatch) return prefixMatch[1].trim();
         const suffixMatch = text.match(
-          new RegExp(`(?:^|[^\\w$])([-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?\\s*${escaped})(?=[^\\w$]|$)`, 'i'),
+          new RegExp(`(?:^|[^\\w$])([-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?\\s*${escaped})(?=[^\\w$]|$)`, 'i'),
         );
         if (suffixMatch) return suffixMatch[1].trim();
       }
@@ -352,11 +375,11 @@ export function extractNumericToken(text: string, semantic?: SemanticValue): str
     if (codeMatch && CURRENCY_CODES.has(codeMatch[1])) {
       const code = codeMatch[1];
       const prefixMatch = text.match(
-        new RegExp(`\\b(${code}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?)\\b`, 'i'),
+        new RegExp(`\\b(${code}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
       );
       if (prefixMatch) return prefixMatch[1].trim();
       const suffixMatch = text.match(
-        new RegExp(`\\b([-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?\\s*${code})\\b`, 'i'),
+        new RegExp(`\\b([-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?\\s*${code})\\b`, 'i'),
       );
       if (suffixMatch) return suffixMatch[1].trim();
     }
@@ -365,11 +388,11 @@ export function extractNumericToken(text: string, semantic?: SemanticValue): str
   if (sem.type === 'followers' || sem.type === 'views') {
     const keywords = sem.type === 'followers' ? FOLLOWER_KEYWORDS : VIEW_KEYWORDS;
     const beforeMatch = text.match(
-      new RegExp(`(-?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?)\\s*(?:${keywords.source})\\b`, 'i'),
+      new RegExp(`(-?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\s*(?:${keywords.source})\\b`, 'i'),
     );
     if (beforeMatch) return beforeMatch[1].trim();
     const afterMatch = text.match(
-      new RegExp(`(?:${keywords.source})[:\\s]+(-?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?)\\b`, 'i'),
+      new RegExp(`(?:${keywords.source})[:\\s]+(-?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
     );
     if (afterMatch) return afterMatch[afterMatch.length - 1].trim();
   }
@@ -402,20 +425,25 @@ export function extractNumericToken(text: string, semantic?: SemanticValue): str
     if (glyphMatch) return glyphMatch[0].trim();
   }
 
-  const leadingMatch = text.match(/^(-?[\d,]+(?:\.\d+)?)\s*(k|mm|m|bn|b|t)?/i);
+  const leadingMatch = text.match(/^(-?[\d,]+(?:\.\d+)?)\s*(?:thousands?|millions?|billions?|trillions?|k|mm|m|bn|b|t)?/i);
   if (leadingMatch) return leadingMatch[0].trimEnd();
 
-  const anyNumericMatch = text.match(/\b(-?[\d,]+(?:\.\d+)?\s*(?:k|mm|m|bn|b|t)?)\b/i);
+  const anyNumericMatch = text.match(/\b(-?[\d,]+(?:\.\d+)?\s*(?:thousands?|millions?|billions?|trillions?|k|mm|m|bn|b|t)?)\b/i);
   if (anyNumericMatch) return anyNumericMatch[1].trim();
 
   return text;
 }
 
-/** Bare "1.2K", "45,231", "3.4M" with no keyword context - a generic large count. */
+/** Bare "1.2K", "45,231", "3.4M" — and bare English word forms ("22 thousand",
+ * "1.2 million") — with no keyword context: a generic large count. Word
+ * forms matter because anchor-framing can slice the keyword off a labeled
+ * value ("22 thousand subscribers" → "22 thousand"); without this, that
+ * slice classifies as text and numeric monitors fail it as empty instead
+ * of reading the magnitude that is plainly there. */
 function detectScaledCount(text: string): SemanticValue | null {
   const trimmed = text.trim();
   const unparenthesized = trimmed.replace(/^\((.*)\)$/, '$1').trim();
-  if (!/^-?[\d,]+(?:\.\d+)?\s*(k|mm|m|bn|b|t)$/i.test(unparenthesized)) return null;
+  if (!/^-?[\d,]+(?:\.\d+)?\s*(k|mm|m|bn|b|t|thousands?|millions?|billions?|trillions?)$/i.test(unparenthesized)) return null;
   const normalized = parseScaledNumber(unparenthesized);
   if (normalized === null) return null;
   return { type: 'count', normalized, unit: null, raw: text };
@@ -546,6 +574,32 @@ export function detectSemanticValue(raw: string): SemanticValue {
 /** Human-readable label for a semantic type, for badges and tooltips. */
 export function describeSemanticType(type: SemanticValueType): string {
   return SEMANTIC_TYPE_LABELS[type];
+}
+
+/**
+ * Semantic kinds that all describe "a scaled count of things": a bare
+ * magnitude (`count`: "21k", "1.2M") and the same magnitude with a
+ * thing-label (`followers`: "12.4K followers", "22 thousand
+ * subscribers"; `views`: "222K views"). The label — not the kind —
+ * tells subscribers apart from views, and labels already score
+ * separately during recovery.
+ *
+ * A bare token and its labeled rendering are interchangeable across
+ * renders of the *same* metric: pickers canonicalize ("22 thousand
+ * subscribers" is picked as "21k"-shaped "22k"), while checks read
+ * whatever the page currently renders (an `aria-label` word form, a
+ * suffix form). Requiring exact equality here turns that ordinary
+ * re-render into a permanent wrong-kind rejection of the correct
+ * element. Every other kind still requires an exact match — in
+ * particular `percentage` (change-indicator deltas), `currency`,
+ * `duration`, `storage`, and `stars` are unaffected, as is the
+ * sign-shape check built on top of a kind match.
+ */
+const COUNT_FAMILY: ReadonlySet<SemanticValueType> = new Set(['count', 'followers', 'views']);
+
+export function isCompatibleSemanticKind(a: SemanticValueType, b: SemanticValueType): boolean {
+  if (a === b) return true;
+  return COUNT_FAMILY.has(a) && COUNT_FAMILY.has(b);
 }
 
 /**

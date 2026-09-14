@@ -306,6 +306,10 @@ async function runLiveCheck(monitor: Monitor): Promise<StrategyOutcome> {
       monitor.extractMode,
       monitor.attributeName,
       LOCATE_BUDGET_MS,
+      // Lets a stale stored fingerprint re-anchor from the last known
+      // good value inside the same live read; absent/never-checked
+      // means the plain pipeline runs exactly as before.
+      monitor.lastValue,
     );
 
     return {

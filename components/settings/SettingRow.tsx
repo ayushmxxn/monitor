@@ -81,7 +81,11 @@ export function SettingSelectRow<T extends string | number>({
         onChange={(e) => onValueChange((isNumeric ? Number(e.target.value) : e.target.value) as T)}
       >
         {options.map((option) => (
-          <option key={option.value} value={option.value}>
+          <option
+            key={option.value}
+            value={option.value}
+            className="bg-popover text-popover-foreground"
+          >
             {option.label}
           </option>
         ))}

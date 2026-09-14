@@ -9,6 +9,7 @@ import {
   FORCE_REPROBE_CODES,
   selectPrimaryDiagnostic,
   isPermanentFailure,
+  shouldMarkNeedsRepick,
 } from './diagnostics';
 import { dedupeInFlight } from './concurrency';
 import {
@@ -301,7 +302,7 @@ export async function recordFailure(
   attemptedStrategy: MonitorCheckStrategy | null,
 ): Promise<void> {
   const now = Date.now();
-  const primary = selectPrimaryDiagnostic(diagnostics);
+  const selected = selectPrimaryDiagnostic(diagnostics);
   const message = diagnostics.map(formatDiagnostic).join(' — ');
   // Same commit gate as recordSuccess above: re-fetch first, drop the
   // result for a missing/disabled monitor, and only append history
@@ -317,7 +318,18 @@ export async function recordFailure(
   const nextStrategy = attemptedStrategy ?? current.checkStrategy;
   const consecutiveFailures = current.consecutiveFailures + 1;
   const hasPriorValue = current.lastValue !== null;
-  const isPermanent = isPermanentFailure(primary.code, consecutiveFailures, hasPriorValue);
+  // Terminal identity state: the stored fingerprint (including a
+  // value-anchored re-anchor retry on every attempt) has now failed
+  // repeatedly past the permanent threshold on an existing monitor.
+  // Name it honestly so the UI offers a re-pick instead of an endless
+  // retry loop. The original trace stays in `message`/`lastError`, and
+  // lastValue/history stay preserved; scheduled checks keep running in
+  // case the page changes back.
+  const primary = shouldMarkNeedsRepick(selected.code, consecutiveFailures, hasPriorValue)
+    ? diagnostic('NEEDS_REPICK', selected.detail)
+    : selected;
+  const isPermanent =
+    primary.code === 'NEEDS_REPICK' || isPermanentFailure(primary.code, consecutiveFailures, hasPriorValue);
 
   // Preserve the last known good status when a failure is temporary,
   // transitioning to 'error' only when the failure is genuinely permanent / unrecoverable.

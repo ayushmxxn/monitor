@@ -81,8 +81,17 @@ export function DialogContent({
 
   if (!open) return null;
 
+  // Never leak portaled modals into the host page's document.body when running in content scripts.
+  // In extension pages (like options.html), document.body is safe. In host pages with <monitor-panel>,
+  // require a container inside the shadow DOM.
+  const fallback = typeof document !== 'undefined'
+    ? (document.querySelector('monitor-panel') ? null : document.body)
+    : null;
+  const target = container ?? fallback;
+  if (!target) return null;
+
   return createPortal(
-    <div className={cn(inPanel ? 'absolute' : 'fixed', 'inset-0 z-50')}>
+    <div className={cn(inPanel ? 'absolute' : 'fixed', 'inset-0 z-50 font-sans')}>
       <div
         aria-hidden
         onClick={() => setOpen(false)}
@@ -95,7 +104,7 @@ export function DialogContent({
         tabIndex={-1}
         className={cn(
           inPanel ? 'absolute' : 'fixed',
-          'left-1/2 top-1/2 z-50 w-[calc(100%-2.5rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-lg border border-black/[0.06] bg-popover p-4 text-popover-foreground shadow-2xl',
+          'left-1/2 top-1/2 z-50 w-[calc(100%-2.5rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-lg border border-black/[0.06] bg-popover p-4 text-popover-foreground shadow-2xl font-sans',
           'origin-center animate-dialog-scale-in focus:outline-none',
           className,
         )}
@@ -104,7 +113,7 @@ export function DialogContent({
         {children}
       </div>
     </div>,
-    container ?? document.body,
+    target,
   );
 }
 

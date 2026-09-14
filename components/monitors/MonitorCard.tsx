@@ -1,5 +1,5 @@
 import { Favicon } from "@/components/layout/Favicon";
-import { formatAdaptiveValue, formatRelativeTime } from "@/lib/format";
+import { formatRelativeTime } from "@/lib/format";
 import { checkMonitorNow } from "@/lib/monitors/client";
 import { SpinningCounter } from "@/components/ui/SpinningCounter";
 import { ValueScanner } from "@/components/ui/ValueScanner";
@@ -123,10 +123,12 @@ export const MonitorCard = memo(function MonitorCard({ monitor, onDelete, onOpen
               >
                 <SpinningCounter
                   key={monitor.id}
-                  value={formatAdaptiveValue(
-                    monitor.lastValue,
-                    monitor.lastSemanticValue,
-                  )}
+                  // The canonical stored value, exactly as the detail view
+                  // renders it - never an adaptively compacted form. Compaction
+                  // is lossy ("1,651" -> "1.7k") and made the home card disagree
+                  // with the detail view for the same check; the raw value is
+                  // already tile-sized (truncate handles overflow).
+                  value={monitor.lastValue}
                   lastCheckedAt={monitor.lastCheckedAt}
                 />
               </p>

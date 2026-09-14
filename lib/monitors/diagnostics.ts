@@ -18,6 +18,7 @@ export type DiagnosticCode =
   | 'ELEMENT_NOT_FOUND'
   | 'SELECTOR_RECOVERY_LOW_CONFIDENCE'
   | 'EXTRACTION_EMPTY'
+  | 'NEEDS_REPICK'
   | 'TAB_CLOSED'
   | 'OK'
   | 'OK_RECOVERED'
@@ -46,6 +47,8 @@ const EXPLANATIONS: Record<DiagnosticCode, string> = {
   SELECTOR_RECOVERY_LOW_CONFIDENCE:
     'The page changed enough that the closest matching element only partially resembles the original — it was not used automatically.',
   EXTRACTION_EMPTY: 'The element was found but currently has no text (or the configured attribute is empty).',
+  NEEDS_REPICK:
+    'The saved element can no longer be found on this page, even when retrying from the last known value. Delete this monitor and pick the value again to resume monitoring.',
   TAB_CLOSED: 'The background tab used for this check was closed before it finished.',
   OK: 'Checked successfully.',
   OK_RECOVERED: 'The original element moved or changed, but a matching replacement was found automatically.',
@@ -77,10 +80,42 @@ export const FORCE_REPROBE_CODES: ReadonlySet<DiagnosticCode> = new Set([
   'ELEMENT_NOT_FOUND',
   'SELECTOR_RECOVERY_LOW_CONFIDENCE',
   'EXTRACTION_EMPTY',
+  'NEEDS_REPICK',
   'NETWORK_ERROR',
   'PAGE_LOAD_TIMEOUT',
   'TAB_CLOSED',
 ]);
+
+/**
+ * Failure codes where the stored identity itself — not page state, not
+ * loading — is what's wrong: the fingerprint no longer resolves to
+ * anything trustworthy. These are the only codes eligible for a
+ * value-anchored re-anchor attempt (see `buildReanchorFingerprint`),
+ * and, once repeated past the permanent threshold, for the terminal
+ * `NEEDS_REPICK` state instead of an endless retry loop.
+ */
+export const STALE_IDENTITY_CODES: ReadonlySet<DiagnosticCode> = new Set([
+  'ELEMENT_NOT_FOUND',
+  'SELECTOR_RECOVERY_LOW_CONFIDENCE',
+  'EXTRACTION_EMPTY',
+]);
+
+/**
+ * Whether a check failure has reached the terminal identity state: the
+ * monitor has a preserved value, the failure is a stale-identity code
+ * (every attempt, including value-anchored re-anchor retries, already
+ * runs each check), and it has repeated past the permanent threshold.
+ * Pure so the checker and tests share the exact decision.
+ */
+export function shouldMarkNeedsRepick(
+  code: DiagnosticCode | null | undefined,
+  consecutiveFailures: number,
+  hasPriorValue: boolean,
+): boolean {
+  if (!code || !hasPriorValue) return false;
+  if (!STALE_IDENTITY_CODES.has(code)) return false;
+  return consecutiveFailures >= PERMANENT_FAILURE_THRESHOLD;
+}
 
 /** Number of consecutive check failures before a retryable failure is treated as genuinely unrecoverable (permanent error). */
 export const PERMANENT_FAILURE_THRESHOLD = 3;
@@ -95,6 +130,10 @@ export function isPermanentFailure(
   hasPriorValue: boolean,
 ): boolean {
   if (!code) return false;
+  // The terminal identity state is permanent by construction — it is
+  // only ever assigned once the stale-identity threshold below already
+  // passed (see `shouldMarkNeedsRepick`).
+  if (code === 'NEEDS_REPICK') return true;
   // Non-retryable conditions (permission revoked or login required) cannot self-recover without user action
   if (NON_RETRYABLE_CODES.has(code)) return true;
   // If the monitor has never captured any valid value yet, surface the failure immediately
@@ -168,6 +207,16 @@ export function getFailureStateInfo(
         label: 'Page changed',
         description:
           'The page layout or structure changed and no matching element could be verified with confidence.',
+        canRetry: true,
+        actionLabel: 'Check now',
+      };
+
+    case 'NEEDS_REPICK':
+      return {
+        reason: 'page_changed',
+        label: 'Needs re-pick',
+        description:
+          'The saved element can no longer be found on this page, even when retrying from the last known value. Delete this monitor and pick the value again to resume monitoring.',
         canRetry: true,
         actionLabel: 'Check now',
       };

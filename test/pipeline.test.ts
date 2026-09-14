@@ -18,11 +18,11 @@
  * Run with `npm test`. Exits non-zero on any failed assertion.
  */
 import { JSDOM } from 'jsdom';
-import { buildFingerprint, locateElement, scoreCandidate, findItemAnchor, findLabelText, isVisuallyHidden, findLikelyContainer, isPermalinkPath } from '../lib/monitors/fingerprint';
+import { buildFingerprint, locateElement, scoreCandidate, buildReanchorFingerprint, findItemAnchor, findLabelText, isVisuallyHidden, findLikelyContainer, isPermalinkPath } from '../lib/monitors/fingerprint';
 import type { ItemAnchorCache } from '../lib/monitors/fingerprint';
-import { locateAndExtract, resolveSettledValue, extractVisibleText } from '../lib/monitors/locate';
+import { locateAndExtract, locateAndExtractWithReanchor, resolveSettledValue, extractVisibleText } from '../lib/monitors/locate';
 import { waitForPageReady, waitForRegionReady } from '../lib/monitors/readiness';
-import { detectSemanticValue, compareSemanticValues, extractNumericToken } from '../lib/monitors/semanticValue';
+import { detectSemanticValue, compareSemanticValues, extractNumericToken, isCompatibleSemanticKind } from '../lib/monitors/semanticValue';
 import { resolvePickerTarget, resolvePickerTargetAtPoint, formatPickerTooltip } from '../lib/monitors/pickerTarget';
 // pageAgent.content.ts is a WXT content script whose `defineContentScript`
 // call only exists at build time - stub it so the module (and its pure
@@ -39,9 +39,12 @@ import { detectAuthWall } from '../lib/monitors/antiAutomation';
 import { serializeByKey, dedupeInFlight } from '../lib/monitors/concurrency';
 import type { ElementFingerprint } from '../lib/monitors/fingerprint';
 import { ensureOffscreenDocument } from '../lib/monitors/offscreenManager';
-import { getFailureStateInfo, selectPrimaryDiagnostic, diagnostic, isPermanentFailure, PERMANENT_FAILURE_THRESHOLD } from '../lib/monitors/diagnostics';
+import { getFailureStateInfo, selectPrimaryDiagnostic, diagnostic, isPermanentFailure, shouldMarkNeedsRepick, PERMANENT_FAILURE_THRESHOLD } from '../lib/monitors/diagnostics';
 import type { DiagnosticCode } from '../lib/monitors/diagnostics';
 import type { MonitorStatus } from '../lib/monitors/types';
+import { RECOVERY_ACCEPT_THRESHOLD, RECOVERY_HIGH_CONFIDENCE, REPROBE_AFTER_LOW_CONFIDENCE_STREAK } from '../lib/monitors/types';
+import { isValidOutcome } from '../lib/monitors/strategies/types';
+import type { StrategyOutcome } from '../lib/monitors/strategies/types';
 import { hasValueChanged } from '../lib/monitors/checker';
 import { calculateValueChange, formatChangeAlertMessage, formatHeroMovement } from '../lib/monitors/changeSummary';
 import { calculateHistoricalBenchmarks } from '../lib/monitors/benchmarks';
@@ -6038,6 +6041,1343 @@ section('Scenario 32: Historical benchmarks and deal insights');
       `reordered metric/delta update extracts "366", never the signed delta (got ${JSON.stringify(out.value)}, diagnostic ${out.diagnostic.code})`,
     );
   }
+}
+
+// ---------------------------------------------------------------------
+// Dynamic-page recovery failures (production report): two failure modes
+// on client-rendered pages (video/channel stats, feed metrics).
+//
+// Mode 1 — "Value not found (stale)": one strategy reports a far
+// below-threshold best candidate (e.g. 12/100 across ~100 elements)
+// while the other locates the slot but finds it empty
+// (EXTRACTION_EMPTY). The empty read must never be accepted or healed
+// onto — the last known value is preserved — and retries must keep
+// re-extracting the candidate until it holds a non-empty, stable
+// value, within the existing time budget.
+//
+// Mode 2 — "Page changed": the page never settles (scripts, animations,
+// streaming content), so the best candidate stays far below threshold
+// on every strategy (e.g. 26/100 across ~150, 22/100 across a handful).
+// A low-confidence candidate must never be accepted either; the last
+// known value is preserved and retries converge once the target's own
+// region mounts, without raising any global timeout.
+//
+// Both scenarios below are deliberately generic (plain cards, labels,
+// and counters — no per-site selectors or lowered thresholds) and
+// exercise the shared `locateAndExtract` + `resolveSettledValue`
+// pipeline only.
+// ---------------------------------------------------------------------
+section('Dynamic pages mode 1: an empty slot is never accepted; retries converge once populated');
+
+{
+  function mode1Doc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  // Fingerprint captured while populated ("21k"), the last known value
+  // the UI keeps showing while recovery is in flight.
+  const { doc: capDoc } = mode1Doc(
+    `<div class="metric-card"><span class="label">Subscribers</span><span class="value">21k</span></div>`,
+  );
+  const capEl = capDoc.querySelector('.value')!;
+  const mode1Fp = buildFingerprint(capEl);
+
+  // Re-render, fresh node identities: the slot exists but is empty (a
+  // loading skeleton), surrounded by unrelated same-tag distractors so
+  // a value-blind structural scan has plenty of candidates yet none
+  // with the value. Recovery must not accept the empty slot.
+  let noise = '';
+  for (let i = 0; i < 100; i += 1) noise += `<span class="value">noise ${i}</span>`;
+  const { dom: emptyDom, doc: emptyDoc } = mode1Doc(
+    `<div class="metric-card"><span class="label">Subscribers</span><span class="value"></span></div><div id="noise">${noise}</div>`,
+  );
+  const emptyWin = emptyDom.window as unknown as Window;
+  // The empty skeleton must never be *accepted*: a recovery-scan score
+  // for it stays below threshold even though its structure matches.
+  const emptySpan = emptyDoc.querySelector('.metric-card .value')!;
+  const emptyRecoveryScore = scoreCandidate(mode1Fp, emptySpan, undefined, { allowEmpty: false });
+  assert(
+    emptyRecoveryScore.score < 55,
+    `an empty slot never clears the recovery threshold on structure alone (recovery score=${emptyRecoveryScore.score})`,
+  );
+  const emptyOut = locateAndExtract(emptyDoc, mode1Fp, 'text', null, emptyWin);
+  assert(emptyOut.value === null, `empty slot yields no value, never "" (got ${JSON.stringify(emptyOut.value)})`);
+  assert(
+    emptyOut.diagnostic.code === 'EXTRACTION_EMPTY' ||
+      emptyOut.diagnostic.code === 'SELECTOR_RECOVERY_LOW_CONFIDENCE' ||
+      emptyOut.diagnostic.code === 'ELEMENT_NOT_FOUND',
+    `empty slot fails honestly instead of succeeding (got ${emptyOut.diagnostic.code})`,
+  );
+  assert(emptyOut.updatedFingerprint === null, 'an empty read never heals the fingerprint onto the skeleton');
+  assert(emptyOut.semanticValue === null, 'an empty read carries no semantic value to poison downstream state');
+
+  // Same pass, ranked fallback: a top-ranked empty skeleton plus the
+  // real populated value one slot down. The populated value wins in a
+  // single read — no extra round trip, no site-specific rule.
+  const { dom: rankDom, doc: rankDoc } = mode1Doc(
+    `<section><div class="metric-card"><span class="label">Subscribers</span><span class="value"></span></div>` +
+      `<div class="metric-card"><span class="label">Subscribers</span><span class="value">21.5k</span></div></section>`,
+  );
+  const rankOut = locateAndExtract(rankDoc, mode1Fp, 'text', null, rankDom.window as unknown as Window);
+  assert(
+    rankOut.value === '21.5k',
+    `ranked fallback skips the empty skeleton for the populated value in the same pass (got ${JSON.stringify(rankOut.value)})`,
+  );
+
+  // Settle behavior: the slot starts empty, then populates mid-budget
+  // (the client render landing). Retries re-extract the candidate
+  // until it is non-empty and stable — within the existing budget, not
+  // by waiting longer.
+  const { dom: settleDom, doc: settleDoc } = mode1Doc(
+    `<div class="metric-card"><span class="label">Subscribers</span><span class="value"></span></div>`,
+  );
+  const settleEl = settleDoc.querySelector('.value')!;
+  setTimeout(() => {
+    settleEl.textContent = '22k';
+  }, 700);
+  const settleStart = Date.now();
+  const settled = await resolveSettledValue(
+    (maxWaitMs) => waitForPageReady(settleDom.window as unknown as Window, { maxWaitMs, minWaitMs: 25 }),
+    () => locateAndExtract(settleDoc, mode1Fp, 'text', null),
+    { maxTotalWaitMs: 5_000, confirmDelayMs: 200 },
+  );
+  const settleElapsed = Date.now() - settleStart;
+  assert(
+    settled.value === '22k',
+    `retries converge on the populated value once the client render lands (got ${JSON.stringify(settled.value)}, diagnostic ${settled.diagnostic.code})`,
+  );
+  assert(
+    settled.diagnostic.code === 'OK' || settled.diagnostic.code === 'OK_RECOVERED',
+    `converged read reports success, not a lingering failure (got ${settled.diagnostic.code})`,
+  );
+  assert(
+    settleElapsed < 5_000,
+    `converges within the existing budget instead of needing longer timeouts (took ${settleElapsed}ms)`,
+  );
+}
+
+section('Dynamic pages mode 2: low-confidence candidates are never accepted on a never-settling page');
+
+{
+  function mode2Doc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  // Fingerprint captured from a prior render of the real metric.
+  const { doc: priorDoc } = mode2Doc(
+    `<div id="stats"><span class="label">Views</span><span class="count">33.9K</span></div>`,
+  );
+  const mode2Fp = buildFingerprint(priorDoc.querySelector('.count')!);
+
+  // A never-settling page: an unrelated ticker mutates for the whole
+  // check while the target's own container mounts late with an updated
+  // value. The first read (before the mount) must fail honestly with
+  // nothing accepted and nothing healed. (Ordinary page prose keeps
+  // this fixture out of the near-empty anti-automation interstitial
+  // shape — this test is about low-confidence recovery, not challenges.)
+  const { dom, doc } = mode2Doc(
+    `<header><nav><a href="/">Home</a><a href="/stats">Stats</a><a href="/about">About</a></nav></header>` +
+      `<main><h1>Channel analytics overview</h1><p>Views, watch time, and subscriber trends update throughout the day.</p>` +
+      `<div id="stats"><div class="skeleton" style="width:60px;height:14px;"></div></div><div id="ticker">0</div></main>` +
+      `<footer><p>Example Corp — all rights reserved.</p></footer>`,
+  );
+  const ticker = doc.getElementById('ticker')!;
+  let n = 0;
+  const timer = setInterval(() => {
+    ticker.textContent = `${++n}`;
+  }, 40);
+  const tooEarly = locateAndExtract(doc, mode2Fp, 'text', null);
+  assert(tooEarly.value === null, 'before the target mounts, no value is fabricated from a low-confidence neighbor');
+  assert(
+    tooEarly.diagnostic.code === 'ELEMENT_NOT_FOUND' || tooEarly.diagnostic.code === 'SELECTOR_RECOVERY_LOW_CONFIDENCE',
+    `early read fails honestly instead of succeeding (got ${tooEarly.diagnostic.code})`,
+  );
+  assert(tooEarly.updatedFingerprint === null, 'a low-confidence miss never heals the fingerprint');
+  assert(tooEarly.semanticValue === null, 'a low-confidence miss carries no semantic value');
+
+  // A structurally similar neighbor holding a different value must
+  // score below the acceptance threshold on the combined signals
+  // (label/context + semantic type + attributes + anchor + structure),
+  // never become the accepted "recovery".
+  doc.getElementById('stats')!.innerHTML =
+    `<span class="label">Likes</span><span class="count">999</span>`;
+  const neighborOut = locateAndExtract(doc, mode2Fp, 'text', null);
+  assert(
+    neighborOut.value === null,
+    `a similar-looking neighbor's value is never substituted (got ${JSON.stringify(neighborOut.value)})`,
+  );
+
+  // The real target mounts late with its updated value; retries find
+  // it via its own region without the page ever going globally quiet
+  // and without raising any timeout.
+  doc.getElementById('stats')!.innerHTML =
+    `<span class="label">Views</span><span class="count">34.1K</span>`;
+  const read = () => locateAndExtract(doc, mode2Fp, 'text', null);
+  const waitForReady = (maxWaitMs: number) => {
+    const container = findLikelyContainer(doc, mode2Fp);
+    return container
+      ? waitForRegionReady(dom.window as unknown as Window, container, { maxWaitMs: Math.min(maxWaitMs, 500) })
+      : waitForPageReady(dom.window as unknown as Window, { maxWaitMs });
+  };
+  const start = Date.now();
+  const recovered = await resolveSettledValue(waitForReady, read, { maxTotalWaitMs: 3_000, confirmDelayMs: 150 });
+  const elapsed = Date.now() - start;
+  clearInterval(timer);
+  assert(
+    recovered.value === '34.1K',
+    `retries converge on the target's own updated value once its region mounts (got ${JSON.stringify(recovered.value)}, diagnostic ${recovered.diagnostic.code})`,
+  );
+  assert(
+    recovered.diagnostic.code === 'OK' || recovered.diagnostic.code === 'OK_RECOVERED',
+    `converged read reports success (got ${recovered.diagnostic.code})`,
+  );
+  assert(elapsed < 3_000, `converges within the existing budget (took ${elapsed}ms)`);
+}
+
+// ---------------------------------------------------------------------
+// Correctness-first recovery hardening (review follow-up). Each block
+// below locks one specific guarantee with a generic fixture (plain
+// cards, labels, counters — no per-site selectors, no lowered
+// thresholds, no raised timeouts):
+//
+// 1. Fast-path recycled slot: the exact selector still resolves but
+//    its slot is now an empty skeleton, while the live value sits one
+//    card down. The check must fall back to the same bounded ranked
+//    recovery instead of locking onto the empty slot.
+// 2. Stale hijacked fingerprint: an anchor captured from the *wrong*
+//    element (what a pre-guard heal could persist) must fail safe —
+//    null value, null heal, null semantic — never a guess, even though
+//    that means the monitor needs a re-pick.
+// 3. Stale empty fingerprint: no value memory at all must still
+//    re-anchor by label+structure (self-recovery works when the stored
+//    identity isn't actively misleading).
+// 4. Attribute-aware empty guard: a text-empty element holding the
+//    monitored attribute clears recovery in attribute mode, and stays
+//    capped in text mode.
+// 5. Ranked fallback skips wrong-kind: a signed delta must never
+//    shadow the same-label metric, regardless of rank order.
+// 6. Cascade contract: fetch failure falls through to live;
+//    all-invalid commits nothing (lastValue preserved); "" never valid.
+// 7. Final-budget reads: expiry never fabricates a value or heals.
+// 8. Placeholders never lock: "--" is retried until the real value.
+// 9. Mid-confidence (55-79) recoveries stay flagged and countable
+//    toward the forced re-probe streak — never silently trusted.
+// ---------------------------------------------------------------------
+section('Fast-path recycled slot: an emptied exact slot falls back to ranked recovery');
+
+{
+  function fpDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  // Captured while populated. Deliberately no stable id/testid anywhere:
+  // dynamic pages churn ids, so the identity here is class+label+
+  // structure — exactly the case where an emptied slot must not lock
+  // the check while a same-label populated neighbor exists.
+  const { doc: capDoc } = fpDoc(
+    `<div class="metric-card"><span class="label">Subscribers</span><span class="value">21k</span></div>` +
+      `<div class="metric-card"><span class="label">Followers</span><span class="value">9k</span></div>`,
+  );
+  const fp = buildFingerprint(capDoc.querySelector('.metric-card .value')!);
+
+  // Framework recycle: the first card's value slot is now an empty
+  // skeleton (same classes/position, so the captured selector still
+  // resolves and scores well), while the live value sits one card down
+  // under the same label.
+  const { dom, doc } = fpDoc(
+    `<div class="metric-card"><span class="label">Subscribers</span><span class="value"></span></div>` +
+      `<div class="metric-card"><span class="label">Subscribers</span><span class="value">22k</span></div>`,
+  );
+
+  // Sanity: the stale selector genuinely still resolves via fast-path —
+  // without the fallback this read would lock onto the empty slot.
+  const located = locateElement(fp, doc);
+  assert(
+    located.method.startsWith('fast-path'),
+    `stale selector still resolves via fast-path, exercising the fallback (got ${located.method})`,
+  );
+
+  const out = locateAndExtract(doc, fp, 'text', null, dom.window as unknown as Window);
+  assert(
+    out.value === '22k',
+    `falls back to the populated recovery candidate instead of locking onto the emptied slot (got ${JSON.stringify(out.value)}, diagnostic ${out.diagnostic.code})`,
+  );
+  assert(
+    out.diagnostic.code === 'OK_RECOVERED',
+    `fallback success is reported as a relocation, not a lucky exact hit (got ${out.diagnostic.code})`,
+  );
+  assert(
+    out.updatedFingerprint !== null && out.updatedFingerprint.textSnapshot === '22k',
+    'heals onto the populated element, never the empty slot',
+  );
+  assert(out.semanticValue !== null, 'fallback carries semantic value');
+}
+
+section('Stale hijacked fingerprint: a pre-corrupted anchor fails safe and never heals');
+
+{
+  function fpDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  // Simulates a monitor whose stored identity was corrupted onto a
+  // neighboring change indicator before the empty/kind guards existed:
+  // the anchor itself describes the wrong element.
+  const { doc: hijackDoc } = fpDoc(
+    `<div class="metric-card"><span class="label">Visitors</span><span class="delta">+5.2%</span></div>`,
+  );
+  const hijackFp = buildFingerprint(hijackDoc.querySelector('.delta')!);
+
+  // The delta is gone; only the true metric remains. A hijacked anchor
+  // (percentage, signed) must never resolve to the metric (number,
+  // unsigned) — that would be guessing, not recovering.
+  const { doc } = fpDoc(
+    `<header><nav><a href="/">Home</a><a href="/stats">Stats</a></nav></header>` +
+      `<main><h1>Channel analytics overview</h1><p>Views, watch time, and subscriber trends update throughout the day.</p>` +
+      `<div class="metric-card"><span class="label">Visitors</span><span class="metric">150</span></div></main>`,
+  );
+  const out = locateAndExtract(doc, hijackFp, 'text', null);
+  assert(
+    out.value === null,
+    `a hijacked anchor never produces a value from the wrong-kind metric (got ${JSON.stringify(out.value)})`,
+  );
+  assert(
+    out.diagnostic.code === 'SELECTOR_RECOVERY_LOW_CONFIDENCE' || out.diagnostic.code === 'ELEMENT_NOT_FOUND',
+    `hijacked read fails honestly instead of succeeding (got ${out.diagnostic.code})`,
+  );
+  assert(out.updatedFingerprint === null, 'a hijacked fingerprint never heals further from a failed read');
+  assert(out.semanticValue === null, 'a hijacked read carries no semantic value to poison downstream state');
+}
+
+section('Stale empty fingerprint: no value memory still re-anchors by label and structure');
+
+{
+  function fpDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  // Stored identity captured from an empty slot: no anchor value, empty
+  // snapshot — misleading in no direction, so label+structure agreement
+  // is sufficient evidence to re-anchor (unlike the hijacked case).
+  const { doc: capDoc } = fpDoc(
+    `<div class="metric-card"><span class="label">Subscribers</span><span class="value"></span></div>`,
+  );
+  const fp = buildFingerprint(capDoc.querySelector('.value')!);
+
+  const { dom, doc } = fpDoc(
+    `<div class="metric-card"><span class="label">Subscribers</span><span class="value">22k</span></div>`,
+  );
+  const out = locateAndExtract(doc, fp, 'text', null, dom.window as unknown as Window);
+  assert(
+    out.value === '22k',
+    `an empty-origin fingerprint re-anchors to the labeled value instead of staying stuck (got ${JSON.stringify(out.value)}, diagnostic ${out.diagnostic.code})`,
+  );
+  assert(out.updatedFingerprint !== null, 'successful re-anchor heals forward onto the populated element');
+}
+
+section('Attribute monitors: a text-empty element holding the attribute clears recovery');
+
+{
+  function fpDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  const { doc: capDoc } = fpDoc(
+    `<div class="metric-card"><span class="label">Count</span><span class="cc" data-testid="amt" data-count="42">42</span></div>`,
+  );
+  const fp = buildFingerprint(capDoc.querySelector('.cc')!);
+  const { dom, doc } = fpDoc(
+    `<div class="metric-card"><span class="label">Count</span><span class="cc" data-testid="amt" data-count="43"></span></div>`,
+  );
+  const target = doc.querySelector('.cc')!;
+
+  // Unit level: the guard judges the value source actually being read.
+  const textCapped = scoreCandidate(fp, target, undefined, { allowEmpty: false });
+  const attrKept = scoreCandidate(fp, target, undefined, { allowEmpty: false, attributeName: 'data-count' });
+  assert(
+    textCapped.score < 55,
+    `text-mode guard still caps a text-empty candidate (score=${textCapped.score})`,
+  );
+  assert(
+    attrKept.score >= 55,
+    `attribute-mode guard keeps a candidate whose monitored attribute is populated (score=${attrKept.score})`,
+  );
+
+  // End to end: text mode fails safe, attribute mode recovers.
+  const textOut = locateAndExtract(doc, fp, 'text', null, dom.window as unknown as Window);
+  assert(textOut.value === null, `text mode yields no value from the text-empty element (got ${JSON.stringify(textOut.value)})`);
+  assert(textOut.updatedFingerprint === null, 'text-mode empty read never heals');
+  const attrOut = locateAndExtract(doc, fp, 'attribute', 'data-count', dom.window as unknown as Window);
+  assert(
+    attrOut.value === '43',
+    `attribute mode extracts the populated attribute (got ${JSON.stringify(attrOut.value)}, diagnostic ${attrOut.diagnostic.code})`,
+  );
+}
+
+section('Ranked fallback: a wrong-kind top candidate never shadows the right-kind value');
+
+{
+  function fpDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  const { doc: capDoc } = fpDoc(
+    `<div class="metric-card"><span class="label">Views</span><span class="count">33.9K</span></div>`,
+  );
+  const fp = buildFingerprint(capDoc.querySelector('.count')!);
+
+  // Same label on both cards, so the signed delta competes structurally;
+  // the loop must reject it by kind and take the metric regardless of
+  // which ranks first.
+  const { dom, doc } = fpDoc(
+    `<div class="metric-card"><span class="label">Views</span><span class="delta">+5.2%</span></div>` +
+      `<div class="metric-card"><span class="label">Views</span><span class="count">34.1K</span></div>`,
+  );
+  const out = locateAndExtract(doc, fp, 'text', null, dom.window as unknown as Window);
+  assert(
+    out.value === '34.1K',
+    `recovers the same-kind metric, never the signed delta (got ${JSON.stringify(out.value)}, diagnostic ${out.diagnostic.code})`,
+  );
+  assert(
+    out.updatedFingerprint === null || out.updatedFingerprint.textSnapshot === '34.1K',
+    'never heals onto the delta element',
+  );
+}
+
+section('Check cascade contract: fetch failure falls through to live; all-invalid never commits');
+
+{
+  function outcomeFor(value: string | null): StrategyOutcome {
+    return {
+      value,
+      diagnostic: diagnostic(value === null ? 'ELEMENT_NOT_FOUND' : 'OK'),
+      updatedFingerprint: null,
+      confidence: value === null ? 0 : 100,
+      method: 'none',
+      semanticValue: null,
+    };
+  }
+  // Mirrors checker.runCheck: the first valid outcome commits, an
+  // invalid one falls through to the next strategy in order.
+  function firstValid(outcomes: StrategyOutcome[]): StrategyOutcome | null {
+    for (const outcome of outcomes) {
+      if (isValidOutcome(outcome)) return outcome;
+    }
+    return null;
+  }
+
+  const liveOk = outcomeFor('34.1K');
+  assert(
+    firstValid([outcomeFor(null), liveOk]) === liveOk,
+    'a fetch failure (null) falls through to the live extraction instead of committing nothing',
+  );
+  assert(
+    firstValid([outcomeFor(null), outcomeFor(null)]) === null,
+    'all strategies failing commits nothing — the last known good value is preserved, no guess stored',
+  );
+  assert(
+    !isValidOutcome(outcomeFor('')),
+    'an empty-string outcome is never valid — "" is never stored as a value',
+  );
+}
+
+section('Final-budget reads: expiry never fabricates a value or heals');
+
+{
+  function fpDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  const { doc: capDoc } = fpDoc(
+    `<div class="metric-card"><span class="label">Subscribers</span><span class="value">21k</span></div>`,
+  );
+  const fp = buildFingerprint(capDoc.querySelector('.value')!);
+
+  // The slot stays empty for the entire (short) budget.
+  const { dom, doc } = fpDoc(
+    `<div class="metric-card"><span class="label">Subscribers</span><span class="value"></span></div>`,
+  );
+  const start = Date.now();
+  const out = await resolveSettledValue(
+    (maxWaitMs) => waitForPageReady(dom.window as unknown as Window, { maxWaitMs, minWaitMs: 25 }),
+    () => locateAndExtract(doc, fp, 'text', null),
+    { maxTotalWaitMs: 600, confirmDelayMs: 150 },
+  );
+  const elapsed = Date.now() - start;
+  assert(out.value === null, `an always-empty slot yields no value at expiry (got ${JSON.stringify(out.value)})`);
+  assert(out.updatedFingerprint === null, 'budget expiry never heals the fingerprint');
+  assert(out.semanticValue === null, 'budget expiry carries no semantic value');
+  assert(
+    out.diagnostic.code === 'EXTRACTION_EMPTY' ||
+      out.diagnostic.code === 'ELEMENT_NOT_FOUND' ||
+      out.diagnostic.code === 'SELECTOR_RECOVERY_LOW_CONFIDENCE',
+    `expiry fails honestly instead of succeeding (got ${out.diagnostic.code})`,
+  );
+  assert(elapsed < 600 + 2_500, `gives up within a bounded time instead of hanging (took ${elapsed}ms)`);
+}
+
+section('Placeholders never lock: "--" is retried until the real text lands');
+
+{
+  function fpDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  // Text monitor: no numeric anchor, so "--" extracts as a (placeholder)
+  // value rather than failing as empty — the settle loop must not lock
+  // it in.
+  const { doc: capDoc } = fpDoc(`<div class="tcard"><span class="tval">Ready</span></div>`);
+  const fp = buildFingerprint(capDoc.querySelector('.tval')!);
+
+  const { dom, doc } = fpDoc(`<div class="tcard"><span class="tval">--</span></div>`);
+  const tval = doc.querySelector('.tval')!;
+  setTimeout(() => {
+    tval.textContent = 'Updated';
+  }, 300);
+  const out = await resolveSettledValue(
+    (maxWaitMs) => waitForPageReady(dom.window as unknown as Window, { maxWaitMs, minWaitMs: 25 }),
+    () => locateAndExtract(doc, fp, 'text', null),
+    { maxTotalWaitMs: 3_000, confirmDelayMs: 150 },
+  );
+  assert(
+    out.value === 'Updated',
+    `converges on the real text instead of locking the "--" placeholder (got ${JSON.stringify(out.value)}, diagnostic ${out.diagnostic.code})`,
+  );
+  assert(
+    out.diagnostic.code === 'OK' || out.diagnostic.code === 'OK_RECOVERED',
+    `converged read reports success (got ${out.diagnostic.code})`,
+  );
+}
+
+section('Mid-confidence recovery (55-79) stays flagged and countable toward re-probe');
+
+{
+  // Locks the validation wiring around the acceptance threshold: a
+  // 55+ recovery heals (existing behavior), but below 80 it must carry
+  // the review flag, and below 75 it must count toward the forced
+  // strategy re-probe streak — never silently trusted.
+  assert(RECOVERY_ACCEPT_THRESHOLD === 55, 'acceptance threshold is still 55 (not lowered)');
+  assert(RECOVERY_HIGH_CONFIDENCE === 80, 'high-confidence bar is still 80');
+  assert(REPROBE_AFTER_LOW_CONFIDENCE_STREAK === 2, 're-probe still triggers after 2 low-confidence relocations');
+  // Mirrors checker.recordSuccess: relocated && confidence < threshold+20.
+  const countsTowardReprobe = (wasRelocated: boolean, confidence: number): boolean =>
+    wasRelocated && confidence < RECOVERY_ACCEPT_THRESHOLD + 20;
+  assert(countsTowardReprobe(true, 60) === true, 'a 60-confidence recovery counts toward the re-probe streak');
+  assert(countsTowardReprobe(true, 74) === true, 'a 74-confidence recovery counts toward the re-probe streak');
+  assert(countsTowardReprobe(true, 75) === false, 'a 75-confidence recovery does not count (boundary is threshold+20)');
+  assert(countsTowardReprobe(false, 60) === false, 'an exact (non-relocated) read never counts, whatever its score');
+}
+
+// ---------------------------------------------------------------------
+// Existing-monitor re-anchoring (production follow-up: the stuck 21k /
+// 79k YouTube monitors). Failure signature from the report, reproduced
+// here with generic fixtures: fetch finds nothing close (low-confidence
+// best across ~100 elements — expected on client-rendered SSR HTML),
+// live resolves the stored selector to an emptied slot
+// (EXTRACTION_EMPTY), and the true value sits restructured nearby with
+// matching label/landmark but stale value memory blocking recovery.
+//
+// Root cause: the single stored fingerprint is the *only* identity the
+// check reasons from, and it is overwritten in place on every success —
+// so a stale or once-hijacked anchor/snapshot poisons scoring, token
+// preference, and the kind gate all at once, with nothing older to fall
+// back to. The fix under test: one extra bounded pass with a re-anchor
+// fingerprint (stored structure/identity + fresh value memory from the
+// preserved lastValue), under identical strictness; honest failure
+// otherwise, with NEEDS_REPICK naming the terminal state for the UI.
+// ---------------------------------------------------------------------
+section('21k repro: stale fingerprint fails on both strategies with lastValue preserved');
+
+{
+  function rDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  // Stored identity as persisted for the failing monitor: a stable-id
+  // selector (still resolving today), an anchor captured from a
+  // neighboring change indicator (persisted before the kind gates
+  // existed), and an old-structure snapshot — i.e. stale value memory
+  // on top of partially stale structure.
+  const { doc: capDoc } = rDoc(
+    `<h1>Why Smart People Fail</h1>` +
+      `<div class="watch old"><div class="stats legacy"><span class="label">Subscribers</span>` +
+      `<span id="metric" class="delta" data-testid="stat-value">+5.2%</span></div></div>`,
+  );
+  const staleFp = buildFingerprint(capDoc.getElementById('metric')!, undefined, {
+    value: '+5.2%',
+    before: 'Subscribers',
+    after: '',
+  });
+
+  // Fetch side (SSR HTML has no client-rendered counts): a low
+  // best-candidate score across a large pool, mirroring the reported
+  // "12/100 across 101 elements".
+  let noise = '';
+  for (let i = 0; i < 100; i += 1) noise += `<span class="n">noise ${i}</span>`;
+  const { doc: ssrDoc } = rDoc(
+    `<header><nav><a href="/">Home</a><a href="/stats">Stats</a></nav></header>` +
+      `<main><h1>Why Smart People Fail</h1><p>Views, watch time, and subscriber trends update throughout the day.</p>` +
+      `<div>${noise}</div></main><footer><p>Example Corp — all rights reserved.</p></footer>`,
+  );
+  const fetchOut = locateAndExtract(ssrDoc, staleFp, 'text', null);
+  assert(fetchOut.value === null, `fetch-side scan finds no value in SSR HTML (got ${JSON.stringify(fetchOut.value)})`);
+  assert(
+    fetchOut.diagnostic.code === 'SELECTOR_RECOVERY_LOW_CONFIDENCE' ||
+      fetchOut.diagnostic.code === 'ELEMENT_NOT_FOUND',
+    `fetch-side fails honestly instead of succeeding (got ${fetchOut.diagnostic.code})`,
+  );
+  assert(fetchOut.updatedFingerprint === null, 'fetch-side miss never heals');
+  if (fetchOut.diagnostic.code === 'SELECTOR_RECOVERY_LOW_CONFIDENCE' && fetchOut.diagnostic.detail) {
+    const m = /(\d+)\/100/.exec(fetchOut.diagnostic.detail);
+    assert(
+      !!m && Number(m[1]) < 55,
+      `fetch-side best stays below the acceptance threshold like the reported 12/100 (got ${JSON.stringify(fetchOut.diagnostic.detail)})`,
+    );
+  }
+
+  // Live side: the stored selector still resolves — to an emptied
+  // skeleton keeping the old hooks — while the true metric lives
+  // restructured one card down under the same label and landmark.
+  const { dom: liveDom, doc: liveDoc } = rDoc(
+    `<h1>Why Smart People Fail</h1>` +
+      `<div class="watch old"><div class="stats legacy"><span class="label">Subscribers</span>` +
+      `<span id="metric" class="delta" data-testid="stat-value"></span></div></div>` +
+      `<section class="stats"><span class="label">Subscribers</span>` +
+      `<span class="count" data-testid="stat-value">21k</span></section>`,
+  );
+  const livePrimary = locateAndExtract(liveDoc, staleFp, 'text', null, liveDom.window as unknown as Window);
+  assert(
+    livePrimary.value === null,
+    `live primary finds no value off the stale fingerprint (got ${JSON.stringify(livePrimary.value)}) — the reported stuck state`,
+  );
+  assert(
+    livePrimary.diagnostic.code === 'EXTRACTION_EMPTY' ||
+      livePrimary.diagnostic.code === 'SELECTOR_RECOVERY_LOW_CONFIDENCE',
+    `live primary fails honestly (got ${livePrimary.diagnostic.code}) — cf. screenshot detail`,
+  );
+  assert(livePrimary.updatedFingerprint === null, 'stuck read never heals the corrupt fingerprint further');
+  assert(livePrimary.semanticValue === null, 'stuck read carries no semantic value');
+
+  // The re-anchor pass — same strictness, fresh value memory from the
+  // preserved lastValue — recovers the true metric in place.
+  const reanchored = locateAndExtractWithReanchor(
+    liveDoc,
+    staleFp,
+    'text',
+    null,
+    liveDom.window as unknown as Window,
+    '21k',
+  );
+  assert(
+    reanchored.value === '21k',
+    `re-anchor recovers the true metric from the preserved lastValue (got ${JSON.stringify(reanchored.value)}, diagnostic ${reanchored.diagnostic.code})`,
+  );
+  assert(
+    reanchored.diagnostic.code === 'OK_RECOVERED' && /re-anchored/.test(reanchored.diagnostic.detail ?? ''),
+    `re-anchor success is marked as such, not confused with an ordinary read (got ${reanchored.diagnostic.code}: ${JSON.stringify(reanchored.diagnostic.detail)})`,
+  );
+  assert(reanchored.updatedFingerprint !== null, 'successful re-anchor heals forward so the monitor converges');
+  assert(reanchored.semanticValue !== null, 're-anchor carries semantic value');
+}
+
+section('buildReanchorFingerprint: rebuilds value memory, preserves identity');
+
+{
+  function rDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return dom.window.document as Document;
+  }
+
+  assert(buildReanchorFingerprint({} as ElementFingerprint, null) === null, 'no lastValue (new monitor) → no re-anchor');
+  assert(buildReanchorFingerprint({} as ElementFingerprint, '') === null, 'empty lastValue → no re-anchor');
+  assert(buildReanchorFingerprint({} as ElementFingerprint, '   ') === null, 'whitespace-only lastValue → no re-anchor');
+
+  const doc = rDoc(
+    `<h1>Why Smart People Fail</h1>` +
+      `<div class="watch old"><div class="stats legacy"><span class="label">Subscribers</span>` +
+      `<span id="metric" class="delta" data-testid="stat-value">+5.2%</span></div></div>`,
+  );
+  const stored = buildFingerprint(doc.getElementById('metric')!, undefined, {
+    value: '+5.2%',
+    before: 'Subscribers',
+    after: '',
+  });
+  const derived = buildReanchorFingerprint(stored, '21k')!;
+  assert(derived !== null, 'a preserved lastValue yields a re-anchor fingerprint');
+  // Value memory is rebuilt from the trusted value…
+  assert(derived.textSnapshot === '21k', `snapshot rebuilt from lastValue (got ${JSON.stringify(derived.textSnapshot)})`);
+  assert(derived.textAnchor?.value === '21k', 'anchor value rebuilt from lastValue');
+  assert(
+    derived.textAnchor?.before === 'Subscribers' && derived.textAnchor?.after === '',
+    'anchor context is kept (narrowing, never widening)',
+  );
+  // …while every identity/structure signal is preserved untouched.
+  assert(
+    derived.id === stored.id &&
+      derived.cssSelector === stored.cssSelector &&
+      derived.xpath === stored.xpath &&
+      JSON.stringify(derived.domPath) === JSON.stringify(stored.domPath) &&
+      JSON.stringify(derived.classSignature) === JSON.stringify(stored.classSignature) &&
+      JSON.stringify(derived.attributes) === JSON.stringify(stored.attributes) &&
+      derived.nearbyLabelText === stored.nearbyLabelText &&
+      derived.landmarkText === stored.landmarkText &&
+      JSON.stringify(derived.itemAnchor) === JSON.stringify(stored.itemAnchor) &&
+      derived.tag === stored.tag &&
+      derived.version === stored.version,
+    'structural/context/identity signals are preserved byte-for-byte',
+  );
+
+  // Anchorless (pre-anchor-era) fingerprints gain a frameless anchor —
+  // value matching without fabricated context.
+  const bare = buildFingerprint(doc.getElementById('metric')!);
+  assert(bare.textAnchor == null, 'sanity: plain capture has no anchor');
+  const derivedBare = buildReanchorFingerprint(bare, '21k')!;
+  assert(
+    derivedBare.textAnchor?.value === '21k' &&
+      derivedBare.textAnchor?.before === '' &&
+      derivedBare.textAnchor?.after === '',
+    'anchorless stored fp gains a value-only anchor, never invented context',
+  );
+}
+
+section('Corrupted fingerprint → successful re-anchor; control without value stays stuck');
+
+{
+  function rDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  // Stored anchor belongs to a neighboring delta (pre-guard hijack);
+  // the delta is gone and only the true metric remains.
+  const { doc: capDoc } = rDoc(
+    `<div class="metric-card"><span class="label">Visitors</span><span class="metric">+5.2%</span></div>`,
+  );
+  const hijackFp = buildFingerprint(capDoc.querySelector('.metric')!, undefined, {
+    value: '+5.2%',
+    before: 'Visitors',
+    after: '',
+  });
+  const { dom, doc } = rDoc(
+    `<header><nav><a href="/">Home</a><a href="/stats">Stats</a></nav></header>` +
+      `<main><h1>Channel analytics overview</h1><p>Views, watch time, and subscriber trends update throughout the day.</p>` +
+      `<div class="metric-card"><span class="label">Visitors</span><span class="metric">150</span></div></main>`,
+  );
+
+  const stuck = locateAndExtractWithReanchor(doc, hijackFp, 'text', null, undefined, null);
+  assert(
+    stuck.value === null && stuck.updatedFingerprint === null,
+    `without a preserved value there is nothing to re-anchor from — stays honestly stuck (got ${JSON.stringify(stuck.value)})`,
+  );
+
+  const recovered = locateAndExtractWithReanchor(
+    doc,
+    hijackFp,
+    'text',
+    null,
+    dom.window as unknown as Window,
+    '150',
+  );
+  assert(
+    recovered.value === '150',
+    `re-anchor from the preserved value recovers the metric the stale anchor blocked (got ${JSON.stringify(recovered.value)})`,
+  );
+  assert(recovered.diagnostic.code === 'OK_RECOVERED', `re-anchor reports relocation (got ${recovered.diagnostic.code})`);
+  assert(recovered.updatedFingerprint !== null, 're-anchor heals forward onto the true element');
+}
+
+section('Re-anchor never guesses: wrong-kind, ambiguous, and placeholder cases fail safe');
+
+{
+  function rDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  const { doc: capDoc } = rDoc(
+    `<div class="metric-card"><span class="label">Visitors</span><span class="metric">150</span></div>`,
+  );
+  const metricFp = buildFingerprint(capDoc.querySelector('.metric')!, undefined, {
+    value: '150',
+    before: 'Visitors',
+    after: '',
+  });
+
+  // Wrong kind only: a percentage delta where the count was. The
+  // derived anchor (number) must still reject it.
+  const { doc: deltaDoc } = rDoc(
+    `<div class="metric-card"><span class="label">Visitors</span><span class="metric">+7.1%</span></div>`,
+  );
+  const wrongKind = locateAndExtractWithReanchor(deltaDoc, metricFp, 'text', null, undefined, '150');
+  assert(
+    wrongKind.value === null && wrongKind.updatedFingerprint === null && wrongKind.semanticValue === null,
+    `re-anchor rejects the wrong-kind delta instead of storing it (got ${JSON.stringify(wrongKind.value)})`,
+  );
+
+  // Ambiguous: two structurally identical same-kind candidates with
+  // different values and no item identity to tell them apart.
+  const { doc: dupDoc } = rDoc(
+    `<div class="metric-card"><span class="label">Views</span><span class="count">150</span></div>` +
+      `<div class="metric-card"><span class="label">Views</span><span class="count">151</span></div>`,
+  );
+  const dupFp = buildFingerprint(capDoc.querySelector('.metric')!);
+  const ambiguous = locateAndExtractWithReanchor(dupDoc, dupFp, 'text', null, undefined, '150');
+  assert(
+    ambiguous.value === null && ambiguous.updatedFingerprint === null,
+    `re-anchor never picks between two tied candidates (got ${JSON.stringify(ambiguous.value)})`,
+  );
+
+  // Placeholder lastValue: nothing trustworthy to rebuild from, so the
+  // primary verdict stands untouched.
+  const placeholder = locateAndExtractWithReanchor(deltaDoc, metricFp, 'text', null, undefined, '--');
+  const primary = locateAndExtract(deltaDoc, metricFp, 'text', null);
+  assert(
+    placeholder.value === primary.value && placeholder.diagnostic.code === primary.diagnostic.code,
+    'a placeholder lastValue skips the re-anchor pass entirely (primary verdict preserved)',
+  );
+}
+
+section('Unrecoverable fingerprint → NEEDS_REPICK terminal state (pure decision + UI copy)');
+
+{
+  // The terminal-state predicate shared by the checker (units only —
+  // recordFailure itself needs extension storage, so the decision is
+  // factored pure precisely so it can be locked here).
+  assert(shouldMarkNeedsRepick('SELECTOR_RECOVERY_LOW_CONFIDENCE', 3, true) === true, 'low-confidence ×3 with a preserved value → re-pick');
+  assert(shouldMarkNeedsRepick('ELEMENT_NOT_FOUND', 4, true) === true, 'not-found ×4 with a preserved value → re-pick');
+  assert(shouldMarkNeedsRepick('EXTRACTION_EMPTY', 3, true) === true, 'empty ×3 with a preserved value → re-pick');
+  assert(shouldMarkNeedsRepick('SELECTOR_RECOVERY_LOW_CONFIDENCE', 2, true) === false, 'below the permanent threshold → keeps retrying, not re-pick');
+  assert(shouldMarkNeedsRepick('SELECTOR_RECOVERY_LOW_CONFIDENCE', 3, false) === false, 'no preserved value (fresh monitor) → never re-pick');
+  assert(shouldMarkNeedsRepick('NETWORK_ERROR', 9, true) === false, 'load failures are not identity failures → never re-pick');
+  assert(shouldMarkNeedsRepick('PAGE_LOAD_TIMEOUT', 9, true) === false, 'timeouts are not identity failures → never re-pick');
+  assert(shouldMarkNeedsRepick('ANTI_AUTOMATION_DETECTED', 9, true) === false, 'challenge pages are not identity failures → never re-pick');
+  assert(shouldMarkNeedsRepick('OK', 99, true) === false, 'success never re-picks');
+  assert(shouldMarkNeedsRepick(null, 9, true) === false, 'missing code never re-picks');
+
+  const info = getFailureStateInfo('NEEDS_REPICK');
+  assert(info.label === 'Needs re-pick', `terminal state is labeled for action (got ${JSON.stringify(info.label)})`);
+  assert(
+    /pick the value again/.test(info.description),
+    `terminal state tells the user the concrete next step (got ${JSON.stringify(info.description)})`,
+  );
+  assert(info.canRetry === true, 'retry stays available — the page may change back and checks keep running');
+  assert(info.actionLabel === 'Check now', `existing retry affordance is reused (got ${JSON.stringify(info.actionLabel)})`);
+  assert(isPermanentFailure('NEEDS_REPICK', 1, true) === true, 'terminal state is permanent by construction');
+}
+
+section('Fresh and healthy monitors are unaffected by the re-anchor path');
+
+{
+  function rDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  // New monitor: no preserved value → wrapper is exactly the primary.
+  const { doc: capDoc } = rDoc(
+    `<div class="metric-card"><span class="label">Subscribers</span><span class="value">21k</span></div>`,
+  );
+  const fp = buildFingerprint(capDoc.querySelector('.value')!);
+  const { dom, doc } = rDoc(
+    `<div class="metric-card"><span class="label">Subscribers</span><span class="value">21k</span></div>`,
+  );
+  const win = dom.window as unknown as Window;
+  const primary = locateAndExtract(doc, fp, 'text', null, win);
+  const wrapped = locateAndExtractWithReanchor(doc, fp, 'text', null, win, null);
+  assert(primary.value === '21k', `sanity: healthy primary reads the value (got ${JSON.stringify(primary.value)})`);
+  assert(
+    wrapped.value === primary.value &&
+      wrapped.diagnostic.code === primary.diagnostic.code &&
+      wrapped.method === primary.method &&
+      wrapped.updatedFingerprint === primary.updatedFingerprint,
+    'with no lastValue the wrapper returns the primary verdict untouched (no extra pass, no relabel)',
+  );
+
+  // Healthy changed value: primary succeeds, so no re-anchor runs even
+  // when a lastValue is supplied.
+  doc.querySelector('.value')!.textContent = '22k';
+  const changed = locateAndExtractWithReanchor(doc, fp, 'text', null, win, '21k');
+  assert(changed.value === '22k', `healthy update still reads through (got ${JSON.stringify(changed.value)})`);
+  assert(
+    !/re-anchored/.test(changed.diagnostic.detail ?? ''),
+    'a primary success is never relabeled as a re-anchor',
+  );
+}
+
+// ---------------------------------------------------------------------
+// Word-form magnitudes + magnitude-family kinds (production follow-up:
+// stuck 21k/79k subscriber monitors). Failure signature: the stored
+// value memory is a bare canonical token ("21k" → count) while the
+// live page renders aria-hidden rolling digits described by a word-form
+// accessibility label ("22 thousand subscribers" → followers). Exact
+// kind equality turned that ordinary re-render into a permanent
+// wrong-kind rejection of the correct element (found at 60
+// confidence), and the word form additionally normalized to 22 with a
+// "22 t" token. Both halves are fixed generically — no per-site
+// selectors, no threshold or timeout changes:
+//  - magnitude words (thousand/million/billion/trillion) parse,
+//    tokenize, and normalize like K/M/B/T suffixes;
+//  - count/followers/views are one compatible kind family in the
+//    recovery gate (percentages, currency, and everything else stay
+//    exact, and sign protection is unchanged).
+// ---------------------------------------------------------------------
+section('Word-form magnitudes normalize like suffix forms');
+
+{
+  const wordCases: Array<{ text: string; type: string; normalized: number | null }> = [
+    { text: '22 thousand subscribers', type: 'followers', normalized: 22_000 },
+    { text: '1.2 million views', type: 'views', normalized: 1_200_000 },
+    { text: '3.4 billion views', type: 'views', normalized: 3_400_000_000 },
+    { text: '1 trillion views', type: 'views', normalized: 1_000_000_000_000 },
+    { text: '22 Thousand Subscribers', type: 'followers', normalized: 22_000 },
+    // Bare word forms are generic counts too: anchor-framing can slice
+    // the keyword off a labeled value ("22 thousand subscribers" →
+    // "22 thousand"), and that slice must still read as a magnitude
+    // rather than failing numeric monitors as empty.
+    { text: '22 thousand', type: 'count', normalized: 22_000 },
+    { text: '500 thousand', type: 'count', normalized: 500_000 },
+  ];
+  for (const testCase of wordCases) {
+    const result = detectSemanticValue(testCase.text);
+    assert(
+      result.type === testCase.type,
+      `"${testCase.text}" classified as ${testCase.type} (got ${result.type})`,
+    );
+    assert(
+      result.normalized === testCase.normalized,
+      `"${testCase.text}" normalized to ${testCase.normalized} (got ${result.normalized})`,
+    );
+  }
+
+  assert(
+    extractNumericToken('22 thousand subscribers') === '22 thousand',
+    `word-form token extracts cleanly (got ${JSON.stringify(extractNumericToken('22 thousand subscribers'))})`,
+  );
+  assert(
+    extractNumericToken('1.2 million views') === '1.2 million',
+    `word-form token extracts cleanly (got ${JSON.stringify(extractNumericToken('1.2 million views'))})`,
+  );
+  // Suffix forms are byte-identical to before.
+  assert(extractNumericToken('1.73M subscribers') === '1.73M', 'suffix token unchanged');
+  assert(detectSemanticValue('12.4K followers').normalized === 12_400, 'suffix normalization unchanged');
+}
+
+section('Magnitude-family kind compatibility (count/followers/views)');
+
+{
+  assert(isCompatibleSemanticKind('count', 'count') === true, 'identical kinds are compatible');
+  assert(isCompatibleSemanticKind('count', 'followers') === true, 'bare count matches labeled followers');
+  assert(isCompatibleSemanticKind('followers', 'count') === true, 'compatibility is symmetric');
+  assert(isCompatibleSemanticKind('count', 'views') === true, 'bare count matches labeled views');
+  assert(isCompatibleSemanticKind('followers', 'views') === true, 'labeled counts match each other (labels discriminate, not kinds)');
+  assert(isCompatibleSemanticKind('count', 'percentage') === false, 'deltas stay a different kind');
+  assert(isCompatibleSemanticKind('followers', 'percentage') === false, 'labeled counts still reject percentages');
+  assert(isCompatibleSemanticKind('count', 'currency') === false, 'money stays a different kind');
+  assert(isCompatibleSemanticKind('count', 'duration') === false, 'durations stay a different kind');
+  // Documented boundary (not part of this fix): plain unscaled numbers
+  // stay strict, so a count crossing the K boundary (999 → 1.2K) is a
+  // known follow-up, deliberately left for its own change.
+  assert(isCompatibleSemanticKind('number', 'count') === false, 'plain numbers stay strict (documented boundary)');
+  assert(isCompatibleSemanticKind('number', 'views') === false, 'plain numbers stay strict against views too');
+}
+
+section('YouTube-shaped aria-label values recover through the family gate');
+
+{
+  function rDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  // Stored identity from the plain-text era: bare canonical anchor
+  // ("21k" → count), stable selector still resolving today.
+  const { doc: capDoc } = rDoc(
+    `<h1>Why Smart People Fail</h1>` +
+      `<div id="owner"><span id="sub" aria-label="21 thousand subscribers">21k</span></div>`,
+  );
+  const fp = buildFingerprint(capDoc.getElementById('sub')!, undefined, {
+    value: '21k',
+    before: '',
+    after: '',
+  });
+
+  // Live render: aria-hidden rolling digits described by a word-form
+  // label — the extraction reads "22 thousand subscribers"
+  // (followers, 22000), not the bare token the anchor remembers.
+  const { dom, doc } = rDoc(
+    `<h1>Why Smart People Fail</h1>` +
+      `<div id="owner"><span id="sub" aria-label="22 thousand subscribers">` +
+      `<span aria-hidden="true">2</span><span aria-hidden="true">2</span><span aria-hidden="true">k</span>` +
+      `</span></div>`,
+  );
+
+  // A fresh pick on the live render canonicalizes consistently now
+  // instead of truncating to "22".
+  const fresh = resolvePickerTarget(doc.getElementById('sub')!)!;
+  assert(
+    fresh.canonicalValue === '22 thousand',
+    `fresh pick canonicalizes the word-form value, not a truncated number (got ${JSON.stringify(fresh.canonicalValue)})`,
+  );
+  assert(fresh.semanticValue.type === 'followers', `fresh pick classifies followers (got ${fresh.semanticValue.type})`);
+  assert(
+    fresh.semanticValue.normalized === 22_000,
+    `fresh pick normalizes the word magnitude (got ${fresh.semanticValue.normalized})`,
+  );
+
+  // The existing monitor recovers instead of kind-rejecting forever.
+  const out = locateAndExtractWithReanchor(doc, fp, 'text', null, dom.window as unknown as Window, '21k');
+  assert(
+    out.value === '22 thousand',
+    `recovers the live word-form value instead of rejecting it as wrong-kind (got ${JSON.stringify(out.value)}, diagnostic ${out.diagnostic.code})`,
+  );
+  assert(
+    out.diagnostic.code === 'OK' || out.diagnostic.code === 'OK_RECOVERED',
+    `recovery reports success, not a lingering kind-mismatch (got ${out.diagnostic.code})`,
+  );
+  assert(
+    out.semanticValue?.type === 'followers' && out.semanticValue?.normalized === 22_000,
+    `recovered semantic value is followers/22000 (got ${out.semanticValue?.type}/${out.semanticValue?.normalized})`,
+  );
+  assert(out.updatedFingerprint !== null, 'successful recovery heals forward so the monitor converges');
+}
+
+section('Delta and sign protections survive the family gate');
+
+{
+  function rDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  const { doc: capDoc } = rDoc(
+    `<div class="metric-card"><span class="label">Visitors</span><span class="metric">150</span></div>`,
+  );
+  const fp = buildFingerprint(capDoc.querySelector('.metric')!, undefined, {
+    value: '150',
+    before: 'Visitors',
+    after: '',
+  });
+
+  // Same slot, same structure, now a signed percentage delta: still
+  // rejected (percentage is outside the family), never stored or healed.
+  const { doc: deltaDoc } = rDoc(
+    `<div class="metric-card"><span class="label">Visitors</span><span class="metric">+7.1%</span></div>`,
+  );
+  const deltaOut = locateAndExtractWithReanchor(deltaDoc, fp, 'text', null, undefined, '150');
+  assert(
+    deltaOut.value === null &&
+      deltaOut.updatedFingerprint === null &&
+      deltaOut.semanticValue === null,
+    `a percentage delta in the watched slot is still rejected with no heal (got ${JSON.stringify(deltaOut.value)}, ${deltaOut.diagnostic.code})`,
+  );
+  assert(
+    deltaOut.diagnostic.code === 'SELECTOR_RECOVERY_LOW_CONFIDENCE',
+    `delta rejection stays low-confidence, not empty/not-found (got ${deltaOut.diagnostic.code})`,
+  );
+
+  // Same kind, different sign, no intact frame: still a delta, still
+  // rejected by the sign check the family gate did not weaken.
+  // (Percentage-based: count tokens drop a leading "+" during token
+  // extraction, so the sign shape that survives to this check lives on
+  // percentages — exactly the dashboard-delta shape.)
+  const { doc: signCapDoc } = rDoc(
+    `<div class="metric-card"><span class="label">Rate</span><span class="metric">87%</span></div>`,
+  );
+  const signFp = buildFingerprint(signCapDoc.querySelector('.metric')!, undefined, {
+    value: '87%',
+    before: 'Rate',
+    after: '',
+  });
+  const { doc: signedDoc } = rDoc(
+    `<div class="metric-card"><span class="label">Rate</span><span class="metric">+5.2%</span></div>`,
+  );
+  const signedOut = locateAndExtractWithReanchor(signedDoc, signFp, 'text', null, undefined, '87%');
+  assert(
+    signedOut.value === null && signedOut.updatedFingerprint === null,
+    `a signed delta without frame evidence is still rejected (got ${JSON.stringify(signedOut.value)}, ${signedOut.diagnostic.code})`,
+  );
+}
+
+// ---------------------------------------------------------------------
+// Value-kind fallback pool (production follow-up: view counts stuck at
+// "best candidate scored 20/100"). Failure signature: the true element
+// scores 68 when scored, but the recovery scan never scores it — tag
+// changed across renders, stable attributes churned, the captured value
+// text moved on (so the value-anchored pool is empty), and no
+// item/container anchor resolves. The verdict degrades to a dud pool
+// best (~20) with no extraction ever attempted. The fix is recall-only:
+// one more pool, last, of elements whose own text carries a watched
+// semantic kind (anchor → snapshot). Scoring (55), ambiguity, and all
+// kind/sign/frame gates are unchanged, so this converts "never scored"
+// into "scored strictly" — fast-path checks never scan and pay nothing.
+// ---------------------------------------------------------------------
+section('Value-kind pool: a tag-churned metric is scored and recovered');
+
+{
+  function rDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  const TITLE = 'How to Make Wealth - Read & Written By Paul Graham (AI Paul Graham)';
+  // Captured before the re-render: a plain span, old classes, no
+  // anchor (pre-anchor era), snapshot carries the views keyword.
+  const { doc: capDoc } = rDoc(
+    `<h1>${TITLE}</h1>` +
+      `<div id="info"><span class="old-views-class">19,102 views</span><span>2 Apr 2024</span></div>`,
+  );
+  const oldEl = Array.from(capDoc.querySelectorAll('span')).find((e) => (e.textContent ?? '').includes('views'))!;
+  const fp = buildFingerprint(oldEl);
+
+  // Restructured render: custom-element tag, new classes, updated
+  // count, same landmark. The true element is in no structural pool —
+  // only its views-kind text identifies it as a candidate.
+  const { dom, doc } = rDoc(
+    `<ytd-app><ytd-watch-flexy><h1 class="style-scope ytd-watch-metadata">${TITLE}</h1>` +
+      `<ytd-watch-info-text><div id="info">` +
+      `<yt-formatted-string class="style-scope ytd-watch-info-text">19,357 views</yt-formatted-string>` +
+      `<yt-formatted-string class="style-scope ytd-watch-info-text">2 Apr 2024</yt-formatted-string>` +
+      `</div></ytd-watch-info-text></ytd-watch-flexy></ytd-app>`,
+  );
+  const out = locateAndExtract(doc, fp, 'text', null, dom.window as unknown as Window);
+  assert(
+    out.value === '19,357',
+    `recovers the tag-churned metric through the kind pool (got ${JSON.stringify(out.value)}, diagnostic ${out.diagnostic.code})`,
+  );
+  assert(
+    out.diagnostic.code === 'OK_RECOVERED',
+    `recovery is reported as a relocation (got ${out.diagnostic.code})`,
+  );
+  assert(out.updatedFingerprint !== null, 'successful recovery heals forward so the monitor converges');
+  assert(
+    out.semanticValue?.type === 'views' && out.semanticValue?.normalized === 19_357,
+    `recovered semantic value is views/19357 (got ${out.semanticValue?.type}/${out.semanticValue?.normalized})`,
+  );
+}
+
+section('Value-kind pool never defeats identity protection or honest failure');
+
+{
+  function rDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  // A different video's view count is kind-pooled but must still lose
+  // to the landmark conflict — the pool admits to scoring, never to
+  // accepting.
+  const { doc: capDoc } = rDoc(
+    `<div class="watch"><h1>First Video Title</h1>` +
+      `<div class="stats"><span class="count">1.1M views</span></div></div>`,
+  );
+  const fp = buildFingerprint(capDoc.querySelector('.count')!);
+  const { doc } = rDoc(
+    `<div class="watch"><h1>Completely Different Second Video</h1>` +
+      `<div class="stats"><yt-formatted-string class="views">999K views</yt-formatted-string></div></div>`,
+  );
+  const clash = locateAndExtract(doc, fp, 'text', null);
+  assert(
+    clash.value === null && clash.updatedFingerprint === null,
+    `a different video's count is never substituted even when kind-pooled (got ${JSON.stringify(clash.value)}, ${clash.diagnostic.code})`,
+  );
+
+  // Total drift (no shared signal at all) still fails safe with no
+  // heal — the pool finds nothing worth scoring highly.
+  const { doc: driftDoc } = rDoc(
+    `<header><nav><a href="/">Home</a></nav></header>` +
+      `<main><h1>Unrelated Dashboard</h1><p>Nothing here resembles the watched metric.</p></main>`,
+  );
+  const drift = locateAndExtractWithReanchor(driftDoc, fp, 'text', null, undefined, '1.1M');
+  assert(
+    drift.value === null && drift.updatedFingerprint === null && drift.semanticValue === null,
+    `total drift still fails safe with no heal (got ${JSON.stringify(drift.value)}, ${drift.diagnostic.code})`,
+  );
+}
+
+section('Value-kind pool uses magnitude-family compatibility (count/followers/views)');
+
+{
+  function rDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  const TITLE = 'How to Make Wealth - Read & Written By Paul Graham (AI Paul Graham)';
+  // Stored value memory is a bare canonical token ("21k" → count) with
+  // a value-first frame ("21k subscribers" shape, lowercase as rendered
+  // on real count lines). The live metric renders as plain keyword text
+  // ("22 thousand subscribers" → followers) under a churned tag with no
+  // shared attributes — invisible to every structural pool (different
+  // tag, same-tag container scan finds only the label, no anchor-value
+  // text anywhere, no testid/aria/classes). Shared lowercase label,
+  // landmark, frame, and positions are the only bridges.
+  const { doc: capDoc } = rDoc(
+    `<h1>${TITLE}</h1>` +
+      `<div id="info"><span>subscribers</span><span>21k</span></div>`,
+  );
+  const oldEl = capDoc.querySelectorAll('#info span')[1]!;
+  const fp = buildFingerprint(oldEl, undefined, { value: '21k', before: '', after: ' subscribers' });
+
+  const { dom, doc } = rDoc(
+    `<h1>${TITLE}</h1>` +
+      `<div id="info"><span>subscribers</span>` +
+      `<yt-formatted-string>22 thousand subscribers</yt-formatted-string></div>`,
+  );
+  const out = locateAndExtract(doc, fp, 'text', null, dom.window as unknown as Window);
+  assert(
+    out.value === '22 thousand',
+    `family pooling admits the cross-kind metric for strict scoring (got ${JSON.stringify(out.value)}, diagnostic ${out.diagnostic.code})`,
+  );
+  assert(out.diagnostic.code === 'OK_RECOVERED', `recovery is reported as a relocation (got ${out.diagnostic.code})`);
+  assert(out.updatedFingerprint !== null, 'successful recovery heals forward so the monitor converges');
+  // The anchored slice isolates the bare magnitude ("22 thousand"),
+  // so its kind is honestly count — the keyword-bearing followers
+  // classification belongs to the unsliced string, not the stored one.
+  assert(
+    out.semanticValue?.type === 'count' && out.semanticValue?.normalized === 22_000,
+    `recovered semantic value is count/22000 (got ${out.semanticValue?.type}/${out.semanticValue?.normalized})`,
+  );
+}
+
+section('Value-kind pool boundary: bare-number snapshots stay isolated (documented)');
+
+{
+  function rDoc(html: string) {
+    const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+    (globalThis as any).window = dom.window;
+    (globalThis as any).document = dom.window.document;
+    (globalThis as any).Node = dom.window.Node;
+    (globalThis as any).MutationObserver = dom.window.MutationObserver;
+    (globalThis as any).CSS = dom.window.CSS ?? { escape: (s: string) => s };
+    return { dom, doc: dom.window.document as Document };
+  }
+
+  // A bare numeric snapshot ("19,102" → number, outside the magnitude
+  // family by design) must NOT pull views-kind elements into the pool:
+  // family pooling only widens recall within count/followers/views.
+  // If the real monitor's snapshot turns out bare, this documents that
+  // the follow-up belongs in the gate family (number), not the pool.
+  const TITLE = 'How to Make Wealth - Read & Written By Paul Graham (AI Paul Graham)';
+  const { doc: capDoc } = rDoc(
+    `<h1>${TITLE}</h1>` +
+      `<div id="info"><span class="label">Views</span><span class="old-count">19,102</span></div>`,
+  );
+  const fp = buildFingerprint(capDoc.querySelector('.old-count')!);
+
+  const { dom, doc } = rDoc(
+    `<h1>${TITLE}</h1>` +
+      `<div id="info"><span class="label">Views</span>` +
+      `<yt-formatted-string class="fresh-count">19,357 views</yt-formatted-string></div>`,
+  );
+  const out = locateAndExtract(doc, fp, 'text', null, dom.window as unknown as Window);
+  assert(
+    out.value === null && out.updatedFingerprint === null && out.semanticValue === null,
+    `bare-number snapshots do not pool views-kind candidates (got ${JSON.stringify(out.value)}, ${out.diagnostic.code}) — needs-repick stays honest`,
+  );
 }
 
 console.log('\nDone.');

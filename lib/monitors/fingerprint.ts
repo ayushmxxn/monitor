@@ -21,7 +21,7 @@
  * every signal here degrades gracefully when unavailable).
  */
 
-import { detectSemanticValue, extractNumericToken } from './semanticValue';
+import { detectSemanticValue, extractNumericToken, isCompatibleSemanticKind, type SemanticValueType } from './semanticValue';
 
 export interface ElementFingerprint {
   version: 4 | 5 | 6;
@@ -1097,6 +1097,51 @@ export function buildFingerprint(el: Element, win?: Window, textAnchor: TextAnch
   };
 }
 
+/**
+ * Builds a last-resort re-anchor fingerprint from an existing monitor's
+ * own trusted data: the stored fingerprint's full structural/context/
+ * identity signals (selector, domPath, classes, attributes, labels,
+ * landmark, item anchor — everything describing *where* the value
+ * lives) combined with fresh value memory (snapshot, pattern, anchor)
+ * rebuilt from the monitor's last known good value.
+ *
+ * This addresses exactly one corruption class: stale or hijacked
+ * *value memory*. A stored anchor/snapshot from a neighboring element
+ * (persisted before the kind gates existed) or from a value the page
+ * has long since moved past actively misleads recovery three ways at
+ * once — the anchor-value/text-shape/semantic similarity signals all
+ * vote against the true element, `preferAnchorKindToken` narrows to
+ * the wrong kind, and the kind gate can outright reject the true
+ * element. Rebuilding value memory from `lastValue` removes all three
+ * while changing nothing else, so the standard pipeline (same
+ * thresholds, same kind/sign/frame-echo gates, same ambiguity rule)
+ * judges the re-anchor attempt with identical strictness.
+ *
+ * Returns `null` when there is no usable value memory to rebuild from
+ * (no value yet, or an effectively empty one) — the caller then keeps
+ * the primary failure untouched. Never invents structural signals: a
+ * fingerprint whose *structure* no longer matches anything still fails
+ * honestly (and the checker names that terminal state separately),
+ * rather than guessing from a bare value.
+ */
+export function buildReanchorFingerprint(
+  stored: ElementFingerprint,
+  lastValue: string | null | undefined,
+): ElementFingerprint | null {
+  if (!lastValue || isEffectivelyEmpty(lastValue)) return null;
+  const snapshot = normalizeText(lastValue).slice(0, 200);
+  if (!snapshot) return null;
+  const anchor: TextAnchor = stored.textAnchor
+    ? { value: lastValue, before: stored.textAnchor.before, after: stored.textAnchor.after }
+    : { value: lastValue, before: '', after: '' };
+  return {
+    ...stored,
+    textSnapshot: snapshot,
+    textPattern: classifyTextPattern(lastValue),
+    textAnchor: anchor,
+  };
+}
+
 function jaccard(a: string[], b: string[]): number {
   if (a.length === 0 && b.length === 0) return 1;
   if (a.length === 0 || b.length === 0) return 0;
@@ -1157,6 +1202,7 @@ export function scoreCandidate(
   fp: ElementFingerprint,
   candidate: Element,
   itemAnchorCache?: ItemAnchorCache,
+  options?: { allowEmpty?: boolean; attributeName?: string | null },
 ): ScoredCandidate {
   const signals: Record<string, number> = {};
   let weightedSum = 0;
@@ -1399,7 +1445,33 @@ export function scoreCandidate(
   // context ("this really does look like the same kind of row, just a
   // different one") without ever letting that similarity cross the
   // acceptance threshold.
-  const score = itemIdentityConflict ? Math.min(rawScore, 20) : rawScore;
+  let score = itemIdentityConflict ? Math.min(rawScore, 20) : rawScore;
+  // An effectively empty candidate (no visible text, no aria-label to
+  // speak of — and, for attribute monitors, none of the monitored
+  // attribute either) must never clear the acceptance threshold via a
+  // recovery scan: structural similarity alone cannot make emptiness
+  // a value. Capped — not zeroed — so diagnostics still show how
+  // similar it was. Exact/fast-path matches are exempt (see
+  // `allowEmpty`): an element found at its exact prior location that
+  // is currently empty is honestly "found but empty"
+  // (EXTRACTION_EMPTY, retryable), not "low confidence".
+  if (options?.allowEmpty === false) {
+    const visible = extractVisibleText(candidate);
+    const aria = candidate.getAttribute('aria-label');
+    const hasVisible = visible !== '' && !isEffectivelyEmpty(visible);
+    const hasAria = aria !== null && aria !== '' && !isEffectivelyEmpty(aria);
+    // Attribute-mode awareness: a text-empty element can still be a
+    // genuine value holder when the monitored attribute itself is
+    // populated (e.g. an `<input value="...">` or a `data-*` readout
+    // with no rendered text). The guard only treats the candidate as
+    // empty when *all* applicable value sources are empty.
+    const attrName = options?.attributeName ?? null;
+    const attrRaw = attrName ? candidate.getAttribute(attrName) : null;
+    const hasAttr = attrRaw !== null && attrRaw.trim() !== '' && !isEffectivelyEmpty(attrRaw);
+    if (!hasVisible && !hasAria && !hasAttr) {
+      score = Math.min(score, 20);
+    }
+  }
   return { element: candidate, score, signals };
 }
 
@@ -1512,6 +1584,42 @@ function gatherCandidates(doc: Document, fp: ElementFingerprint, itemAnchorCache
   // Tag pool last and always, as the broadest fallback net.
   addAll((el) => el.tagName.toLowerCase() === fp.tag);
 
+  // Value-kind pool, after every structural pool: elements whose own
+  // text carries a watched semantic kind (anchor → snapshot). Kinds
+  // compare by the existing magnitude-family compatibility (see
+  // `isCompatibleSemanticKind`), not exact equality: a bare "21k"
+  // (count) and its labeled rendering ("22 thousand subscribers" →
+  // followers) are the same kind of value, so either one pools the
+  // other. This is the net for the case every structural signal missed
+  // at once: tag changed across renders, stable attributes churned, the
+  // captured value text itself moved on (so the value-anchored pool is
+  // empty), and no item/container anchor resolves. Scoring is
+  // untouched — pooled candidates still need 55+, ambiguity and
+  // kind/sign gates still apply — so this only converts "never scored"
+  // into "scored strictly". Positioned last so the existing pool order
+  // (and which candidates fill the scoring cap on huge pages) is
+  // unchanged whenever earlier pools already match. Text monitors (no
+  // known value kind) skip it: without a kind there is nothing to
+  // filter on.
+  const wantedKinds = new Set<SemanticValueType>();
+  for (const source of [fp.textAnchor?.value, fp.textSnapshot]) {
+    if (!source) continue;
+    const sem = detectSemanticValue(source);
+    if (sem.type !== 'text' && sem.normalized !== null) wantedKinds.add(sem.type);
+  }
+  if (wantedKinds.size > 0) {
+    addAll((el) => {
+      const text = el.textContent ?? '';
+      if (!text || !/\d/.test(text)) return false;
+      const sem = detectSemanticValue(text);
+      if (sem.type === 'text') return false;
+      for (const wanted of wantedKinds) {
+        if (isCompatibleSemanticKind(wanted, sem.type)) return true;
+      }
+      return false;
+    });
+  }
+
   return merged;
 }
 
@@ -1553,17 +1661,73 @@ function findMatchingItemRoot(doc: Document, fp: ElementFingerprint, itemAnchorC
 }
 
 /**
- * Attempts to (re)locate the element `fp` describes within `doc`.
+ * Single shared recovery scan: gathers candidates once and scores them
+ * with the full combined signal bundle (semantic type, nearby
+ * labels/context, stable attributes, anchor text, structural and item
+ * identity signals) under the non-empty requirement. Both
+ * `locateElement` (single best) and `rankRecoveryCandidates` (ranked
+ * fallback) build on this so one DOM read costs one gather+score pass,
+ * not two — Check Now stays fast on large pages without raising any
+ * timeout.
+ */
+function runRecoveryScan(
+  fp: ElementFingerprint,
+  doc: Document,
+  itemAnchorCache: ItemAnchorCache,
+  acceptThreshold: number,
+  scanOptions?: { attributeName?: string | null },
+): {
+  candidates: Element[];
+  sorted: ScoredCandidate[];
+  best: ScoredCandidate | null;
+  runnerUp: ScoredCandidate | null;
+  ambiguous: boolean;
+} {
+  const candidates = gatherCandidates(doc, fp, itemAnchorCache);
+  // Full sort path (used when the caller needs the ranked fallback
+  // list): score the bounded pool, then sort once. Bounded by
+  // MAX_SCORED either way.
+  const scored: ScoredCandidate[] = [];
+  for (const el of candidates) {
+    if (scored.length >= MAX_SCORED) break;
+    scored.push(scoreCandidate(fp, el, itemAnchorCache, { allowEmpty: false, attributeName: scanOptions?.attributeName ?? null }));
+  }
+  scored.sort((a, b) => b.score - a.score);
+  const best = scored[0] ?? null;
+  const runnerUp = scored[1] ?? null;
+  const ambiguous = Boolean(
+    best && runnerUp && best.score < 90 && runnerUp.score >= best.score - 3 &&
+      !(fp.itemAnchor?.href || fp.itemAnchor?.datetime || fp.itemAnchor?.rowKey),
+  );
+  return { candidates, sorted: scored, best, runnerUp, ambiguous };
+}
+
+/**
+ * Attempts to (re)locate the element `fp` describes within `doc`,
+ * together with the ranked recovery list from the same single scan.
  * Tries the captured selector and XPath first (cheap, and correct the
  * overwhelming majority of the time when the DOM hasn't changed) before
  * falling back to a full scored recovery scan.
+ *
+ * This is the single-scan core `locateAndExtract` uses: one
+ * gather+score pass yields both the locate verdict and the ranked
+ * fallback, so a dynamic page's empty-skeleton-vs-populated-value
+ * decision never pays for the same scan twice. `locateElement` and
+ * `rankRecoveryCandidates` below are thin wrappers over it preserving
+ * their exact existing contracts.
  */
-export function locateElement(
+export function locateElementWithRanking(
   fp: ElementFingerprint,
   doc: Document,
-  options?: { acceptThreshold?: number },
-): LocateResult {
+  options?: { acceptThreshold?: number; limit?: number; attributeName?: string | null },
+): {
+  locate: LocateResult;
+  ranked: ScoredCandidate[];
+  ambiguous: boolean;
+} {
   const acceptThreshold = options?.acceptThreshold ?? 55;
+  const limit = options?.limit ?? MAX_RECOVERY_FALLBACK_CANDIDATES;
+  const attributeName = options?.attributeName ?? null;
   // Shared for the whole call so every candidate that shares an item
   // root (every cell in the same table row, every child of the same
   // feed item) reuses that root's already-scanned identity data instead
@@ -1575,7 +1739,11 @@ export function locateElement(
   if (fastSelector) {
     const scored = scoreCandidate(fp, fastSelector, itemAnchorCache);
     if (scored.score >= acceptThreshold) {
-      return { ...scored, candidatesConsidered: 1, method: 'fast-path-selector' };
+      return {
+        locate: { ...scored, candidatesConsidered: 1, method: 'fast-path-selector' },
+        ranked: [],
+        ambiguous: false,
+      };
     }
   }
 
@@ -1589,35 +1757,38 @@ export function locateElement(
   if (fastXpath && fastXpath !== fastSelector) {
     const scored = scoreCandidate(fp, fastXpath, itemAnchorCache);
     if (scored.score >= acceptThreshold) {
-      return { ...scored, candidatesConsidered: 1, method: 'fast-path-xpath' };
+      return {
+        locate: { ...scored, candidatesConsidered: 1, method: 'fast-path-xpath' },
+        ranked: [],
+        ambiguous: false,
+      };
     }
   }
 
-  const candidates = gatherCandidates(doc, fp, itemAnchorCache);
-  let best: ScoredCandidate | null = null;
-  let runnerUp: ScoredCandidate | null = null;
-  let scoredCount = 0;
-  for (const el of candidates) {
-    if (scoredCount >= MAX_SCORED) break;
-    const scored = scoreCandidate(fp, el, itemAnchorCache);
-    scoredCount += 1;
-    if (!best || scored.score > best.score) {
-      runnerUp = best;
-      best = scored;
-    } else if (!runnerUp || scored.score > runnerUp.score) {
-      runnerUp = scored;
-    }
-    if (best.score >= 98) break; // near-perfect match, stop early
-  }
-
+  const scan = runRecoveryScan(fp, doc, itemAnchorCache, acceptThreshold, { attributeName });
   // A recovered candidate that is effectively tied with another item is
   // not trustworthy enough to monitor. This intentionally favors a clear
   // "needs review" result over silently switching to a duplicate metric.
-  const ambiguous =
-    best && runnerUp && best.score < 90 && runnerUp.score >= best.score - 3 &&
-    !(fp.itemAnchor?.href || fp.itemAnchor?.datetime || fp.itemAnchor?.rowKey);
-  if (best && best.score >= acceptThreshold && !ambiguous) {
-    return { ...best, candidatesConsidered: candidates.length, method: 'recovery-scan' };
+  if (scan.ambiguous) {
+    return {
+      locate: {
+        element: null,
+        score: scan.best?.score ?? 0,
+        signals: scan.best?.signals ?? {},
+        candidatesConsidered: scan.candidates.length,
+        method: scan.best ? 'recovery-scan' : 'none',
+      },
+      ranked: [],
+      ambiguous: true,
+    };
+  }
+  const ranked = scan.sorted.filter((s) => s.score >= acceptThreshold).slice(0, limit);
+  if (scan.best && scan.best.score >= acceptThreshold) {
+    return {
+      locate: { ...scan.best, candidatesConsidered: scan.candidates.length, method: 'recovery-scan' },
+      ranked,
+      ambiguous: false,
+    };
   }
 
   // Below threshold: report the best candidate's score/signals for
@@ -1629,10 +1800,73 @@ export function locateElement(
   // unrelated button that happens to share a tag name) can end up
   // treated as a successful, high-trust recovery instead of a failure.
   return {
-    element: null,
-    score: best?.score ?? 0,
-    signals: best?.signals ?? {},
-    candidatesConsidered: candidates.length,
-    method: best ? 'recovery-scan' : 'none',
+    locate: {
+      element: null,
+      score: scan.best?.score ?? 0,
+      signals: scan.best?.signals ?? {},
+      candidatesConsidered: scan.candidates.length,
+      method: scan.best ? 'recovery-scan' : 'none',
+    },
+    ranked: [],
+    ambiguous: false,
+  };
+}
+
+/**
+ * Attempts to (re)locate the element `fp` describes within `doc`.
+ * Tries the captured selector and XPath first (cheap, and correct the
+ * overwhelming majority of the time when the DOM hasn't changed) before
+ * falling back to a full scored recovery scan.
+ */
+export function locateElement(
+  fp: ElementFingerprint,
+  doc: Document,
+  options?: { acceptThreshold?: number },
+): LocateResult {
+  return locateElementWithRanking(fp, doc, options).locate;
+}
+
+/**
+ * Ranked recovery candidates for value-aware extraction fallback.
+ *
+ * Same scoring as `locateElement`'s recovery scan (including the
+ * non-empty requirement), but returns the top candidates sorted by
+ * score instead of only the single best. `locateAndExtract` uses this
+ * to skip a top-ranked candidate whose extraction comes back empty
+ * (a loading skeleton that is structurally right but holds no value
+ * yet) in favor of the next-best non-empty one — reusing the exact
+ * same combined signal bundle (semantic type, nearby labels/context,
+ * stable attributes, anchor text, structural relationships) rather
+ * than a site-specific rule.
+ *
+ * Returns at most `limit` candidates, all at or above
+ * `acceptThreshold`, in descending score order. Empty when the scan
+ * is ambiguous or nothing clears the threshold (same bar as
+ * `locateElement`).
+ */
+export const MAX_RECOVERY_FALLBACK_CANDIDATES = 12;
+
+export function rankRecoveryCandidates(
+  fp: ElementFingerprint,
+  doc: Document,
+  options?: { acceptThreshold?: number; limit?: number; attributeName?: string | null },
+): { ranked: ScoredCandidate[]; candidatesConsidered: number; ambiguous: boolean } {
+  // Standalone contract (unchanged): always a full recovery scan,
+  // independent of whether the fast path would hit. `locateAndExtract`
+  // calls this only on the exact-failure path (the fast-path slot
+  // itself came back empty) as well as for the recovery fallback.
+  const acceptThreshold = options?.acceptThreshold ?? 55;
+  const limit = options?.limit ?? MAX_RECOVERY_FALLBACK_CANDIDATES;
+  const itemAnchorCache: ItemAnchorCache = new Map();
+  const scan = runRecoveryScan(fp, doc, itemAnchorCache, acceptThreshold, {
+    attributeName: options?.attributeName ?? null,
+  });
+  if (scan.ambiguous) {
+    return { ranked: [], candidatesConsidered: scan.candidates.length, ambiguous: true };
+  }
+  return {
+    ranked: scan.sorted.filter((s) => s.score >= acceptThreshold).slice(0, limit),
+    candidatesConsidered: scan.candidates.length,
+    ambiguous: false,
   };
 }
