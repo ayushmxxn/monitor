@@ -130,23 +130,137 @@ const SCALE_SUFFIX_SOURCE = '(?:thousands?|millions?|billions?|trillions?|k|mm|m
 
 /** First numeric token in `text`, with an optional trailing K/M/B/T scale suffix expanded. */
 function parseScaledNumber(text: string): number | null {
-  const match = text
-    .replace(/,/g, '')
-    .match(new RegExp(`(-?\\d+(?:\\.\\d+)?)\\s*(${SCALE_SUFFIX_SOURCE})?\\b`, 'i'));
+  const match = text.match(
+    new RegExp(`(-?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?))\\s*(${SCALE_SUFFIX_SOURCE})?\\b`, 'i'),
+  );
   if (!match) return null;
-  const base = parseFloat(match[1]);
-  if (Number.isNaN(base)) return null;
+  const base = parseLocalizedNumberFragment(match[1]);
+  if (base === null) return null;
   const suffix = match[2]?.toLowerCase();
   const scale = suffix ? SCALE_SUFFIXES[suffix] ?? 1 : 1;
   return base * scale;
 }
+
+/**
+ * Continental-European numeric syntax support (demonstrated wrong-value
+ * class — committed with high confidence, sometimes with a heal):
+ * - decimal comma: "9,99 €" parsed as 999, "54,55%" as 54;
+ * - dot-thousands groups: "1.234,56 €" truncated to the "234,56 €"
+ *   span (234.56 instead of 1234.56);
+ * - space/apostrophe grouping: "1 234" truncated to the "1" span.
+ *
+ * US-valid numbers can never match the shapes below, so trying them
+ * first cannot steal a US match: comma tails are 1–2 digits with no
+ * third digit following (US thousands always take exactly 3), dot
+ * groups come in pairs-or-more or with a comma tail (a bare "1.234"
+ * stays a US decimal — genuinely ambiguous, deliberately preserved),
+ * and space/apostrophe groups are strict 3-digit runs. Mid-number
+ * starts are blocked by the leading guard, so "1,234" can never match
+ * as "2,34". Typographic group separators (narrow/regular no-break
+ * space, thin space, ASCII and curly apostrophes) apply anywhere;
+ * bare ASCII-space grouping only in whole-token positions (free text
+ * separates words and phone-like runs with plain spaces, so those stay
+ * conservative).
+ */
+const EU_SEP_CLASS = "[\\u00A0\\u2009\\u202F'\\u2019]";
+const EU_SEP_TOKEN_CLASS = "[ \\u00A0\\u2009\\u202F'\\u2019]";
+const EU_GUARD_CLASS = "[\\d.,'\\u2019\\u00A0\\u2009\\u202F]";
+/**
+ * Free-text-safe continental fragment shared by the tokenizer scans in
+ * this module and `collectNumericTokens` (`locate.ts`), so both agree
+ * on what counts as one number. See the invariant comment above:
+ * US-valid text can never match it.
+ */
+export const EU_NUM_FREE =
+  "(?<!" +
+  EU_GUARD_CLASS +
+  ")(?:\\d{1,3}(?:\\.\\d{3}){2,}(?:,\\d{1,2})?|\\d{1,3}(?:\\.\\d{3})+,\\d{1,2}|\\d+,\\d{1,2}|\\d{1,3}(?:" +
+  EU_SEP_CLASS +
+  "\\d{3})+)(?!\\d)";
+
+/**
+ * Whole-token variant of the continental shapes above, additionally
+ * allowing bare ASCII-space grouping. Used only where the match
+ * position itself proves the span is one number: full-token `^...$`
+ * validators, element-start `^` anchors, and patterns whose numeric
+ * core sits directly adjacent to a currency symbol, `%`, unit word,
+ * or keyword. Free-text scans must use EU_NUM_FREE instead — plain
+ * spaces separate words and phone-like runs out there.
+ */
+const EU_NUM_TOKEN =
+  "(?<![\\d.,'])(?:\\d{1,3}(?:\\.\\d{3}){2,}(?:,\\d{1,2})?|\\d{1,3}(?:\\.\\d{3})+,\\d{1,2}|\\d+,\\d{1,2}|\\d{1,3}(?:" +
+  EU_SEP_TOKEN_CLASS +
+  "\\d{3})+)(?!\\d)";
+
+/**
+ * Rewrites a matched numeric fragment into canonical US-ASCII form
+ * (plain digits plus at most one dot) or returns null when the
+ * fragment is uninterpretable. Strict shapes only — anything else
+ * falls through to the historical comma-stripping behavior, and
+ * fragments that survive no rule fail closed (null) instead of
+ * guessing. US-valid fragments always canonicalize to a string that
+ * parses identically to the old comma-stripping path.
+ */
+function canonicalizeNumericFragment(fragment: string): string | null {
+  let s = fragment.trim();
+  let negative = false;
+  const sign = s.match(/^([-+])\s*/);
+  if (sign) {
+    negative = sign[1] === '-';
+    s = s.slice(sign[0].length);
+  }
+  // Strict thousands grouping (typographic separators; ASCII space
+  // only reaches here from whole-token positions, never free text).
+  s = s.replace(/(\d)[ \u00A0\u2009\u202F'\u2019](\d{3})(?!\d)/g, '$1$2');
+  // Continental dot-thousands: multi-dot groups, or dot groups with a
+  // comma-decimal tail. A bare single "1.234" is ambiguous with a US
+  // decimal and is deliberately left untouched.
+  s = s.replace(/(\d{1,3}(?:\.\d{3})+)(,\d{1,2})?/g, (m, int: string, tail: string | undefined) => {
+    if (!tail && (int.match(/\./g) ?? []).length < 2) return m;
+    return int.replace(/\./g, '') + (tail ? `.${tail.slice(1)}` : '');
+  });
+  // US thousands commas and Indian digit grouping collapse fully
+  // here (anchored whole-fragment shapes, so chained groups like
+  // "2,500,000,000" cannot stall halfway the way a single left-to-right
+  // pass does). An optional decimal tail is part of the shape, so
+  // "68,412.10" collapses to "68412.10" instead of failing closed.
+  // Anything comma-bearing left over after this is either a decimal
+  // comma (next rule) or malformed (fails closed below).
+  if (/^\d{1,3}(?:,\d{3})+(?:\.\d+)?$/.test(s) || /^\d{1,2}(?:,\d{2})*,\d{3}(?:\.\d+)?$/.test(s)) {
+    s = s.replace(/,/g, '');
+  } else {
+    // Continental decimal comma: 1-2 tail digits, never mid-number
+    // (the guards plus the collapse above mean "1,234" can never
+    // arrive here as "1,23" + "4"), and never just before a decimal
+    // fraction (a partial span like "79,52" of "79,525.75").
+    s = s.replace(/(?<![\d.,])(\d{1,3}),(\d{1,2})(?!\d)(?!\.\d)/g, '$1.$2');
+  }
+  s = s.trim();
+  if (!/^\d+(?:\.\d+)?$/.test(s)) return null;
+  return (negative ? '-' : '') + s;
+}
+
+/**
+ * Parses a matched numeric fragment to a number across US and strict
+ * continental syntax, or null when it cannot be read confidently.
+ * Replaces bare comma-stripping `parseFloat` at every value-computing
+ * site so magnitudes agree with the (possibly EU-complete) display
+ * span the fragment was matched from.
+ */
+export function parseLocalizedNumberFragment(fragment: string): number | null {
+  const canonical = canonicalizeNumericFragment(fragment);
+  if (canonical === null) return null;
+  const parsed = parseFloat(canonical);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 
 function detectCurrency(text: string): SemanticValue | null {
   for (const [symbol, code] of CURRENCY_SYMBOLS) {
     if (text.includes(symbol)) {
       const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const prefixMatch = text.match(
-        new RegExp(`(?:^|[^\\w$])([-+]?\\s*${escaped}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
+        new RegExp(`(?:^|[^\\w$])([-+]?\\s*${escaped}\\s*[-+]?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?)\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
       );
       if (prefixMatch) {
         const normalized = parseScaledNumber(prefixMatch[1].replace(symbol, ' '));
@@ -156,7 +270,7 @@ function detectCurrency(text: string): SemanticValue | null {
         }
       }
       const suffixMatch = text.match(
-        new RegExp(`(?:^|[^\\w$])([-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?\\s*${escaped})(?=[^\\w$]|$)`, 'i'),
+        new RegExp(`(?:^|[^\\w$])([-+]?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?)\\s*${SCALE_SUFFIX_SOURCE}?\\s*${escaped})(?=[^\\w$]|$)`, 'i'),
       );
       if (suffixMatch) {
         const normalized = parseScaledNumber(suffixMatch[1].replace(symbol, ' '));
@@ -178,7 +292,7 @@ function detectCurrency(text: string): SemanticValue | null {
   if (codeMatch && CURRENCY_CODES.has(codeMatch[1])) {
     const code = codeMatch[1];
     const prefixMatch = text.match(
-      new RegExp(`\\b(${code}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
+      new RegExp(`\\b(${code}\\s*[-+]?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?)\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
     );
     if (prefixMatch) {
       const normalized = parseScaledNumber(prefixMatch[1].replace(code, ' '));
@@ -188,7 +302,7 @@ function detectCurrency(text: string): SemanticValue | null {
       }
     }
     const suffixMatch = text.match(
-      new RegExp(`\\b([-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?\\s*${code})\\b`, 'i'),
+      new RegExp(`\\b([-+]?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?)\\s*${SCALE_SUFFIX_SOURCE}?\\s*${code})\\b`, 'i'),
     );
     if (suffixMatch) {
       const normalized = parseScaledNumber(suffixMatch[1].replace(code, ' '));
@@ -208,19 +322,25 @@ function detectCurrency(text: string): SemanticValue | null {
 }
 
 function detectPercentage(text: string): SemanticValue | null {
-  const match = text.match(/(-?\d+(?:\.\d+)?)\s*%/);
+  const match = text.match(new RegExp(`(-?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?))\\s*%`));
   if (!match) return null;
-  return { type: 'percentage', normalized: parseFloat(match[1]), unit: '%', raw: text };
+  // Routed through the localized parser so continental decimal commas
+  // ("54,55%") read correctly instead of truncating at the comma.
+  const normalized = parseLocalizedNumberFragment(match[1]);
+  if (normalized === null) return null;
+  return { type: 'percentage', normalized, unit: '%', raw: text };
 }
 
 function detectStars(text: string): SemanticValue | null {
-  // "4.8/5", "4.8 out of 5", "4.8 stars", "4.8 ★"
-  const scaledMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:\/\s*(\d+)|out of\s*(\d+)|★|stars?)\b/i);
+  // "4.8/5", "4.8 out of 5", "4.8 stars", "4.8 ★" (and continental "4,8/5").
+  const scaledMatch = text.match(new RegExp(`((?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?))\\s*(?:\\/\\s*(\\d+)|out of\\s*(\\d+)|★|stars?)\\b`, 'i'));
   if (scaledMatch) {
     const scale = scaledMatch[2] ?? scaledMatch[3] ?? '5';
+    const normalized = parseLocalizedNumberFragment(scaledMatch[1]);
+    if (normalized === null) return null;
     return {
       type: 'stars',
-      normalized: parseFloat(scaledMatch[1]),
+      normalized,
       unit: `/${scale}`,
       raw: text,
     };
@@ -254,12 +374,13 @@ const STORAGE_UNITS: Record<string, { bytes: number; label: string }> = {
 
 function detectStorage(text: string): SemanticValue | null {
   const match = text.match(
-    /(-?\d+(?:\.\d+)?)\s*(pib|tib|gib|mib|kib|pb|tb|gb|mb|kb|bytes?|b)\b/i,
+    new RegExp(`(-?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?))\\s*(pib|tib|gib|mib|kib|pb|tb|gb|mb|kb|bytes?|b)\\b`, 'i'),
   );
   if (!match) return null;
   const unit = STORAGE_UNITS[match[2].toLowerCase()];
   if (!unit) return null;
-  const amount = parseFloat(match[1]);
+  const amount = parseLocalizedNumberFragment(match[1]);
+  if (amount === null) return null;
   return { type: 'storage', normalized: amount * unit.bytes, unit: unit.label, raw: text };
 }
 
@@ -298,8 +419,12 @@ function detectDuration(text: string): SemanticValue | null {
     return { type: 'duration', normalized: seconds, unit: 's', raw: text };
   }
 
-  const unitRegex = /(\d+(?:\.\d+)?)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/gi;
+  const unitRegex = new RegExp(
+    `((?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?))\\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\\b`,
+    'gi',
+  );
   const matches = [...trimmed.matchAll(unitRegex)];
+  if (matches.length === 0) return null;
   if (matches.length === 0) return null;
 
   // A single match is only trusted as a duration when its unit is a
@@ -311,7 +436,8 @@ function detectDuration(text: string): SemanticValue | null {
 
   let totalSeconds = 0;
   for (const m of matches) {
-    const amount = parseFloat(m[1]);
+    const amount = parseLocalizedNumberFragment(m[1]);
+    if (amount === null) continue;
     const unitSeconds = DURATION_UNIT_SECONDS[m[2].toLowerCase()];
     if (unitSeconds === undefined) continue;
     totalSeconds += amount * unitSeconds;
@@ -329,7 +455,7 @@ function detectKeywordCount(
 ): SemanticValue | null {
   if (!keywords.test(text)) return null;
   const beforeMatch = text.match(
-    new RegExp(`(-?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\s*(?:${keywords.source})\\b`, 'i'),
+    new RegExp(`(-?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?)\\s*${SCALE_SUFFIX_SOURCE}?)\\s*(?:${keywords.source})\\b`, 'i'),
   );
   if (beforeMatch) {
     const normalized = parseScaledNumber(beforeMatch[1]);
@@ -338,7 +464,7 @@ function detectKeywordCount(
     }
   }
   const afterMatch = text.match(
-    new RegExp(`(?:${keywords.source})[:\\s]+(-?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
+    new RegExp(`(?:${keywords.source})[:\\s]+(-?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?)\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
   );
   if (afterMatch) {
     const normalized = parseScaledNumber(afterMatch[afterMatch.length - 1]);
@@ -362,11 +488,11 @@ export function extractNumericToken(text: string, semantic?: SemanticValue): str
       if (text.includes(symbol)) {
         const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const prefixMatch = text.match(
-          new RegExp(`(?:^|[^\\w$])([-+]?\\s*${escaped}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
+          new RegExp(`(?:^|[^\\w$])([-+]?\\s*${escaped}\\s*[-+]?(?:${EU_NUM_TOKEN}|[\\d,]+(?:\\.\\d+)?)\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
         );
         if (prefixMatch) return prefixMatch[1].trim();
         const suffixMatch = text.match(
-          new RegExp(`(?:^|[^\\w$])([-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?\\s*${escaped})(?=[^\\w$]|$)`, 'i'),
+          new RegExp(`(?:^|[^\\w$])([-+]?(?:${EU_NUM_TOKEN}|[\\d,]+(?:\\.\\d+)?)\\s*${SCALE_SUFFIX_SOURCE}?\\s*${escaped})(?=[^\\w$]|$)`, 'i'),
         );
         if (suffixMatch) return suffixMatch[1].trim();
       }
@@ -375,11 +501,11 @@ export function extractNumericToken(text: string, semantic?: SemanticValue): str
     if (codeMatch && CURRENCY_CODES.has(codeMatch[1])) {
       const code = codeMatch[1];
       const prefixMatch = text.match(
-        new RegExp(`\\b(${code}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
+        new RegExp(`\\b(${code}\\s*[-+]?(?:${EU_NUM_TOKEN}|[\\d,]+(?:\\.\\d+)?)\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
       );
       if (prefixMatch) return prefixMatch[1].trim();
       const suffixMatch = text.match(
-        new RegExp(`\\b([-+]?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?\\s*${code})\\b`, 'i'),
+        new RegExp(`\\b([-+]?(?:${EU_NUM_TOKEN}|[\\d,]+(?:\\.\\d+)?)\\s*${SCALE_SUFFIX_SOURCE}?\\s*${code})\\b`, 'i'),
       );
       if (suffixMatch) return suffixMatch[1].trim();
     }
@@ -388,23 +514,23 @@ export function extractNumericToken(text: string, semantic?: SemanticValue): str
   if (sem.type === 'followers' || sem.type === 'views') {
     const keywords = sem.type === 'followers' ? FOLLOWER_KEYWORDS : VIEW_KEYWORDS;
     const beforeMatch = text.match(
-      new RegExp(`(-?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\s*(?:${keywords.source})\\b`, 'i'),
+      new RegExp(`(-?(?:${EU_NUM_TOKEN}|[\\d,]+(?:\\.\\d+)?)\\s*${SCALE_SUFFIX_SOURCE}?)\\s*(?:${keywords.source})\\b`, 'i'),
     );
     if (beforeMatch) return beforeMatch[1].trim();
     const afterMatch = text.match(
-      new RegExp(`(?:${keywords.source})[:\\s]+(-?[\\d,]+(?:\\.\\d+)?\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
+      new RegExp(`(?:${keywords.source})[:\\s]+(-?(?:${EU_NUM_TOKEN}|[\\d,]+(?:\\.\\d+)?)\\s*${SCALE_SUFFIX_SOURCE}?)\\b`, 'i'),
     );
     if (afterMatch) return afterMatch[afterMatch.length - 1].trim();
   }
 
   if (sem.type === 'percentage') {
-    const match = text.match(/([+-]?[\d,]+(?:\.\d+)?\s*%)/);
+    const match = text.match(new RegExp(`([+-]?(?:${EU_NUM_TOKEN}|[\\d,]+(?:\\.\\d+)?)\\s*%)`));
     if (match) return match[1].trim();
   }
 
   if (sem.type === 'storage') {
     const match = text.match(
-      /(-?[\d,]+(?:\.\d+)?\s*(?:pib|tib|gib|mib|kib|pb|tb|gb|mb|kb|bytes?|b))\b/i,
+      new RegExp(`(-?(?:${EU_NUM_TOKEN}|[\\d,]+(?:\\.\\d+)?)\\s*(?:pib|tib|gib|mib|kib|pb|tb|gb|mb|kb|bytes?|b))\\b`, 'i'),
     );
     if (match) return match[1].trim();
   }
@@ -413,22 +539,22 @@ export function extractNumericToken(text: string, semantic?: SemanticValue): str
     const colonMatch = text.match(/\b(\d+:\d{2}(?::\d{2})?)\b/);
     if (colonMatch) return colonMatch[1];
     const unitMatch = text.match(
-      /(\d+(?:\.\d+)?\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?:\s*\d+(?:\.\d+)?\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s))*)\b/i,
+      new RegExp(`((?:${EU_NUM_TOKEN}|\\d+(?:\\.\\d+)?)\\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?:\\s*(?:${EU_NUM_TOKEN}|\\d+(?:\\.\\d+)?)\\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s))*)\\b`, 'i'),
     );
     if (unitMatch) return unitMatch[1].trim();
   }
 
   if (sem.type === 'stars') {
-    const scaledMatch = text.match(/(\d+(?:\.\d+)?\s*(?:\/\s*\d+|out of\s*\d+|★|stars?))\b/i);
+    const scaledMatch = text.match(new RegExp(`((?:${EU_NUM_TOKEN}|\\d+(?:\\.\\d+)?)\\s*(?:\\/\\s*\\d+|out of\\s*\\d+|★|stars?))\\b`, 'i'));
     if (scaledMatch) return scaledMatch[1].trim();
     const glyphMatch = text.match(/[★☆]+/);
     if (glyphMatch) return glyphMatch[0].trim();
   }
 
-  const leadingMatch = text.match(/^(-?[\d,]+(?:\.\d+)?)\s*(?:thousands?|millions?|billions?|trillions?|k|mm|m|bn|b|t)?/i);
+  const leadingMatch = text.match(new RegExp(`^(-?(?:${EU_NUM_TOKEN}|[\\d,]+(?:\\.\\d+)?))\\s*(?:thousands?|millions?|billions?|trillions?|k|mm|m|bn|b|t)?`, 'i'));
   if (leadingMatch) return leadingMatch[0].trimEnd();
 
-  const anyNumericMatch = text.match(/\b(-?[\d,]+(?:\.\d+)?\s*(?:thousands?|millions?|billions?|trillions?|k|mm|m|bn|b|t)?)\b/i);
+  const anyNumericMatch = text.match(new RegExp(`\\b(-?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?)\\s*(?:thousands?|millions?|billions?|trillions?|k|mm|m|bn|b|t)?)\\b`, 'i'));
   if (anyNumericMatch) return anyNumericMatch[1].trim();
 
   return text;
@@ -443,7 +569,7 @@ export function extractNumericToken(text: string, semantic?: SemanticValue): str
 function detectScaledCount(text: string): SemanticValue | null {
   const trimmed = text.trim();
   const unparenthesized = trimmed.replace(/^\((.*)\)$/, '$1').trim();
-  if (!/^-?[\d,]+(?:\.\d+)?\s*(k|mm|m|bn|b|t|thousands?|millions?|billions?|trillions?)$/i.test(unparenthesized)) return null;
+  if (!new RegExp(`^-?(?:${EU_NUM_TOKEN}|[\\d,]+(?:\\.\\d+)?)\\s*(k|mm|m|bn|b|t|thousands?|millions?|billions?|trillions?)$`, 'i').test(unparenthesized)) return null;
   const normalized = parseScaledNumber(unparenthesized);
   if (normalized === null) return null;
   return { type: 'count', normalized, unit: null, raw: text };
@@ -453,9 +579,9 @@ function detectScaledCount(text: string): SemanticValue | null {
 function detectPlainNumber(text: string): SemanticValue | null {
   const trimmed = text.trim();
   const unparenthesized = trimmed.replace(/^\((.*)\)$/, '$1').trim();
-  if (!/^-?[\d,]+(?:\.\d+)?$/.test(unparenthesized)) return null;
-  const normalized = parseFloat(unparenthesized.replace(/,/g, ''));
-  if (Number.isNaN(normalized)) return null;
+  if (!new RegExp(`^-?(?:${EU_NUM_TOKEN}|[\\d,]+(?:\\.\\d+)?)$`).test(unparenthesized)) return null;
+  const normalized = parseLocalizedNumberFragment(unparenthesized);
+  if (normalized === null) return null;
   return { type: 'number', normalized, unit: null, raw: text };
 }
 

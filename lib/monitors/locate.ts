@@ -1,10 +1,10 @@
-import { locateElementWithRanking, rankRecoveryCandidates, buildFingerprint, buildReanchorFingerprint, normalizeText, isEffectivelyEmpty, isVisuallyHidden, extractVisibleText, type ElementFingerprint, type TextAnchor } from './fingerprint';
+import { locateElementWithRanking, rankRecoveryCandidates, buildFingerprint, buildReanchorFingerprint, normalizeText, isEffectivelyEmpty, isVisuallyHidden, isHiddenFromView, extractVisibleText, type ElementFingerprint, type TextAnchor } from './fingerprint';
 import { detectAntiAutomation, detectAuthWall } from './antiAutomation';
 import { detectAccessChange } from './accessChange';
 import { diagnostic, STALE_IDENTITY_CODES, type Diagnostic, type DiagnosticCode } from './diagnostics';
 import { isSameCanonicalCheckUrl } from './itemUrl';
 import { withExponentialBackoff, sleep, type ReadinessResult } from './readiness';
-import { detectSemanticValue, extractNumericToken, isCompatibleSemanticKind, CURRENCY_SYMBOLS, CURRENCY_CODES, type SemanticValue, type SemanticValueType } from './semanticValue';
+import { detectSemanticValue, extractNumericToken, isCompatibleSemanticKind, CURRENCY_SYMBOLS, CURRENCY_CODES, EU_NUM_FREE, type SemanticValue, type SemanticValueType } from './semanticValue';
 
 export interface LocateAndExtractResult {
   value: string | null;
@@ -356,6 +356,21 @@ function attemptExtraction(
   win: Window | undefined,
   wasExactMatch: boolean,
 ): LocateAndExtractResult {
+  // Hidden-subtree gate: an exact selector resolving inside content no
+  // sighted user can see (display:none section, hidden tab pane) must
+  // never yield its stale text as the current value. Fails safe with
+  // no heal, so ranked fallbacks move on to visible candidates (or the
+  // read fails honestly when nothing visible remains).
+  if (isHiddenFromView(element, win)) {
+    return {
+      value: null,
+      diagnostic: diagnostic('EXTRACTION_EMPTY'),
+      updatedFingerprint: null,
+      confidence: score,
+      method,
+      semanticValue: null,
+    };
+  }
   const extracted = extractValue(element, extractMode, attributeName, fp);
 
   const initialSemantic = extracted !== null ? detectSemanticValue(extracted) : null;
@@ -716,21 +731,21 @@ function collectNumericTokens(text: string): AnchorKindToken[] {
   for (const [symbol] of CURRENCY_SYMBOLS) {
     if (!text.includes(symbol)) continue;
     const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    addRegex(new RegExp(`(?:^|[^\\w$])([-+]?\\s*${escaped}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?)\\b`, 'gi'));
-    addRegex(new RegExp(`(?:^|[^\\w$])([-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?\\s*${escaped})(?=[^\\w$]|$)`, 'gi'));
+    addRegex(new RegExp(`(?:^|[^\\w$])([-+]?\\s*${escaped}\\s*[-+]?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?)\\s*(?:k|mm|m|bn|b|t)?)\\b`, 'gi'));
+    addRegex(new RegExp(`(?:^|[^\\w$])([-+]?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?)\\s*(?:k|mm|m|bn|b|t)?\\s*${escaped})(?=[^\\w$]|$)`, 'gi'));
   }
   for (const code of CURRENCY_CODES) {
     if (!text.includes(code)) continue;
-    addRegex(new RegExp(`\\b(${code}\\s*[-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?)\\b`, 'gi'));
-    addRegex(new RegExp(`\\b([-+]?[\\d,]+(?:\\.\\d+)?\\s*(?:k|mm|m|bn|b|t)?\\s*${code})\\b`, 'gi'));
+    addRegex(new RegExp(`\\b(${code}\\s*[-+]?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?)\\s*(?:k|mm|m|bn|b|t)?)\\b`, 'gi'));
+    addRegex(new RegExp(`\\b([-+]?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?)\\s*(?:k|mm|m|bn|b|t)?\\s*${code})\\b`, 'gi'));
   }
-  addRegex(/([+-]?\s*[\d,]+(?:\.\d+)?\s*%)/g);
-  addRegex(/\b(-?[\d,]+(?:\.\d+)?\s*(?:k|mm|m|bn|b|t))\b/gi);
-  addRegex(/\b(\d+(?:\.\d+)?\s*(?:\/\s*\d+|out of\s*\d+|★|stars?))\b/gi);
-  addRegex(/(-?[\d,]+(?:\.\d+)?\s*(?:pib|tib|gib|mib|kib|pb|tb|gb|mb|kb|bytes?|b))\b/gi);
+  addRegex(new RegExp(`([+-]?\\s*(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?)\\s*%)`, 'g'));
+  addRegex(new RegExp(`\\b(-?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?)\\s*(?:k|mm|m|bn|b|t))\\b`, 'gi'));
+  addRegex(new RegExp(`\\b((?:${EU_NUM_FREE}|\\d+(?:\\.\\d+)?)\\s*(?:\\/\\s*\\d+|out of\\s*\\d+|★|stars?))\\b`, 'gi'));
+  addRegex(new RegExp(`(-?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?)\\s*(?:pib|tib|gib|mib|kib|pb|tb|gb|mb|kb|bytes?|b))\\b`, 'gi'));
   addRegex(/\b(\d+:\d{2}(?::\d{2})?)\b/g);
-  addRegex(/(\d+(?:\.\d+)?\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?:\s*\d+(?:\.\d+)?\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s))*)\b/gi);
-  addRegex(/\b(-?[\d,]+(?:\.\d+)?)\b/g);
+  addRegex(new RegExp(`((?:${EU_NUM_FREE}|\\d+(?:\\.\\d+)?)\\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?:\\s*(?:${EU_NUM_FREE}|\\d+(?:\\.\\d+)?)\\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s))*)\\b`, 'gi'));
+  addRegex(new RegExp(`\\b(-?(?:${EU_NUM_FREE}|[\\d,]+(?:\\.\\d+)?))\\b`, 'g'));
 
   return out.sort((a, b) => a.start - b.start);
 }

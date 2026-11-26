@@ -267,6 +267,58 @@ export function isVisuallyHidden(el: Element): boolean {
 }
 
 /**
+ * True when `el` itself or any ancestor up to the document root is
+ * hidden from sighted users. `isVisuallyHidden` above only describes
+ * the element's own box — but `display` is not inherited, so a
+ * `display: none` (or `hidden` / `visibility: hidden`) ancestor still
+ * reports a perfectly visible box for the element itself while
+ * rendering nothing on screen. Reading such a subtree returns stale
+ * content (a hidden tab pane, a toggled-off section, pre-swap content)
+ * as if it were the current value — demonstrated on both strategies,
+ * since computed styles describe the element, never its ancestors.
+ *
+ * Deliberately narrow: the `hidden` attribute, inline
+ * `display: none` / `visibility: hidden|collapse`, and (when a window
+ * is available) their computed equivalents. `aria-hidden` ancestors
+ * never count (assistive-tech-only hiding; the content is still
+ * visibly rendered — single-page rolling counters depend on this),
+ * and class-driven hiding is only trusted via computed styles, never
+ * by class name alone. Bounded walk; never throws.
+ */
+export function isHiddenFromView(el: Element, win?: Window): boolean {
+  if (isVisuallyHidden(el)) return true;
+  const view =
+    win && typeof win.getComputedStyle === 'function'
+      ? win
+      : el.ownerDocument?.defaultView &&
+          typeof el.ownerDocument.defaultView.getComputedStyle === 'function'
+        ? el.ownerDocument.defaultView
+        : null;
+  let node = el.parentElement;
+  let depth = 0;
+  while (node && depth < 25) {
+    if ((node as HTMLElement).hidden || (node.hasAttribute?.('hidden') ?? false)) return true;
+    const inline = node.getAttribute?.('style') ?? '';
+    if (/(^|;)\s*display\s*:\s*none(\s|;|$|!)/i.test(inline)) return true;
+    if (/(^|;)\s*visibility\s*:\s*(hidden|collapse)(\s|;|$|!)/i.test(inline)) return true;
+    if (view) {
+      try {
+        const cs = view.getComputedStyle(node);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse') {
+          return true;
+        }
+      } catch {
+        // Unreadable node (detached mid-check, cross-origin): keep walking.
+      }
+    }
+    if (node === node.ownerDocument?.documentElement) break;
+    node = node.parentElement;
+    depth += 1;
+  }
+  return false;
+}
+
+/**
  * Extracts visible text while skipping subtrees hidden from assistive tech
  * or sighted users. If all child nodes are visually hidden (e.g. animated rolling
  * digit counters marked aria-hidden="true" on YouTube), falls back to the container's
