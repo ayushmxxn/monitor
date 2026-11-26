@@ -4,6 +4,8 @@
 
 Monitor is an open-source Chrome extension for tracking prices, counts, followers, views, percentages, ratings, and other numeric metrics directly from any web page. Click a number on a page, set a check interval, and let Monitor watch it on your device — with no account, no backend, no monitor limits, and zero developer-side data collection.
 
+![Monitor — Track any number on the web](docs/preview.jpg)
+
 ## Principles
 
 - **Free forever, unlimited monitors:** No paywalls, tiers, or caps on how many numbers you track.
