@@ -1,20 +1,13 @@
 import { sendMessage, withTimeout, type ResolvedFaviconResult } from '@/lib/messaging';
 
 const MESSAGE_TIMEOUT_MS = 6_000;
+const SAFE_IMAGE_DATA_URL_RE = /^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+$/i;
 
 const clientResolvedCache = new Map<string, ResolvedFaviconResult>();
 const clientInFlight = new Map<string, Promise<ResolvedFaviconResult | null>>();
 
-/**
- * Builds a URL for a page's favicon via Chrome's `_favicon` special
- * page (requires `favicon` permission and `_favicon/*` in
- * `web_accessible_resources` for content-script usage).
- */
-export function faviconUrl(pageUrl: string, size = 32): string {
-  const url = new URL(`chrome-extension://${browser.runtime.id}/_favicon/`);
-  url.searchParams.set('pageUrl', pageUrl);
-  url.searchParams.set('size', String(size));
-  return url.toString();
+export function isSafeFaviconDataUrl(src: unknown): src is string {
+  return typeof src === 'string' && SAFE_IMAGE_DATA_URL_RE.test(src);
 }
 
 function normalizeHttpPageUrl(pageUrl: string): URL | null {
@@ -60,11 +53,13 @@ export async function resolveSiteFavicon(
         sendMessage('resolveFavicon', { url: parsed.href, size }),
         MESSAGE_TIMEOUT_MS,
       );
-      if (result && (result.kind === 'chrome' || result.kind === 'data' || result.kind === 'none')) {
-        if (result.kind !== 'none') {
-          clientResolvedCache.set(key, result);
-        }
-        return result;
+      if (result?.kind === 'data' && isSafeFaviconDataUrl(result.src)) {
+        const safe: ResolvedFaviconResult = { kind: 'data', src: result.src };
+        clientResolvedCache.set(key, safe);
+        return safe;
+      }
+      if (result?.kind === 'none') {
+        return { kind: 'none', src: null };
       }
       return null;
     } catch {

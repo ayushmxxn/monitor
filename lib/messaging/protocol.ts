@@ -122,7 +122,7 @@ export interface BundledFontPayload {
 }
 
 export interface ResolvedFaviconResult {
-  kind: "chrome" | "data" | "none";
+  kind: "data" | "none";
   src: string | null;
 }
 

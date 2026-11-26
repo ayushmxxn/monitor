@@ -1,15 +1,23 @@
 import type { ResolvedFaviconResult } from '@/lib/messaging';
+import { serializeByKey } from '@/lib/monitors/concurrency';
 import { hasOriginPermission } from '@/lib/permissions';
 import { faviconsItem, type CachedFaviconEntry } from '@/lib/storage/items';
 import { encodeArrayBufferToBase64 } from '@/lib/ui/font';
-import { faviconUrl } from './favicon';
 
 const FAVICON_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const FAVICON_NEGATIVE_TTL_MS = 60 * 1000;
 const MAX_CACHED_FAVICONS = 64;
 const MAX_FAVICON_BYTES = 64 * 1024;
+const MAX_HTML_BYTES = 150_000;
 const DIRECT_FETCH_TIMEOUT_MS = 5_000;
 const PLACEHOLDER_PROBE_URL = 'https://favicon-miss.monitor.invalid/';
+
+export function faviconUrl(pageUrl: string, size = 32): string {
+  const url = new URL(`chrome-extension://${browser.runtime.id}/_favicon/`);
+  url.searchParams.set('pageUrl', pageUrl);
+  url.searchParams.set('size', String(size));
+  return url.toString();
+}
 
 const ALLOWED_IMAGE_MIMES = new Set([
   'image/png',
@@ -25,6 +33,7 @@ const placeholderBytesBySize = new Map<number, Uint8Array | null>();
 const memoryOriginCache = new Map<string, CachedFaviconEntry>();
 const negativeOriginCache = new Map<string, number>();
 const inFlightResolutions = new Map<string, Promise<ResolvedFaviconResult>>();
+const storageWriteQueues = new Map<string, Promise<unknown>>();
 
 function normalizeHttpPageUrl(pageUrl: string): URL | null {
   try {
@@ -150,6 +159,13 @@ function inferImageMime(contentType: string | null, iconUrl: string, bytes: Uint
   if (ALLOWED_IMAGE_MIMES.has(normalizedType)) {
     return normalizedType;
   }
+  if (
+    normalizedType &&
+    normalizedType !== 'application/octet-stream' &&
+    normalizedType !== 'binary/octet-stream'
+  ) {
+    return null;
+  }
 
   if (bytes.byteLength >= 4) {
     if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
@@ -165,12 +181,64 @@ function inferImageMime(contentType: string | null, iconUrl: string, bytes: Uint
   return null;
 }
 
+function isSameOriginResponse(response: Response, expectedOrigin: string): boolean {
+  if (!response.url) return true;
+  try {
+    return new URL(response.url).origin === expectedOrigin;
+  } catch {
+    return false;
+  }
+}
+
+async function readBoundedBytes(response: Response, maxBytes: number): Promise<Uint8Array | null> {
+  const rawLength = response.headers?.get?.('content-length');
+  const contentLength = rawLength ? Number(rawLength) : NaN;
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    await response.body?.cancel?.().catch(() => {});
+    return null;
+  }
+
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength === 0 || buffer.byteLength > maxBytes) return null;
+    return new Uint8Array(buffer);
+  }
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return null;
+  }
+
+  if (total === 0) return null;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
 async function fetchWithTimeout(url: string, accept: string): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DIRECT_FETCH_TIMEOUT_MS);
   try {
     return await fetch(url, {
-      credentials: 'include',
+      credentials: 'same-origin',
       headers: { Accept: accept },
       signal: controller.signal,
     });
@@ -179,16 +247,18 @@ async function fetchWithTimeout(url: string, accept: string): Promise<Response> 
   }
 }
 
-async function tryFetchIconDataUrl(iconUrl: string): Promise<string | null> {
+async function tryFetchIconDataUrl(iconUrl: string, expectedOrigin: string): Promise<string | null> {
   try {
     const response = await fetchWithTimeout(iconUrl, 'image/*,*/*;q=0.8');
-    if (!response.ok) return null;
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength === 0 || buffer.byteLength > MAX_FAVICON_BYTES) return null;
-    const bytes = new Uint8Array(buffer);
+    if (!response.ok || !isSameOriginResponse(response, expectedOrigin)) {
+      await response.body?.cancel?.().catch(() => {});
+      return null;
+    }
+    const bytes = await readBoundedBytes(response, MAX_FAVICON_BYTES);
+    if (!bytes) return null;
     const mime = inferImageMime(response.headers?.get('content-type') ?? null, iconUrl, bytes);
     if (!mime) return null;
-    return `data:${mime};base64,${encodeArrayBufferToBase64(buffer)}`;
+    return `data:${mime};base64,${encodeArrayBufferToBase64(bytes.buffer as ArrayBuffer)}`;
   } catch {
     return null;
   }
@@ -200,7 +270,7 @@ async function fetchSiteFaviconDirectly(parsed: URL): Promise<string | null> {
     return null;
   }
 
-  const directRootIco = await tryFetchIconDataUrl(`${parsed.origin}/favicon.ico`);
+  const directRootIco = await tryFetchIconDataUrl(`${parsed.origin}/favicon.ico`, parsed.origin);
   if (directRootIco) {
     return directRootIco;
   }
@@ -208,14 +278,20 @@ async function fetchSiteFaviconDirectly(parsed: URL): Promise<string | null> {
   for (const pageCandidate of [parsed.href, `${parsed.origin}/`]) {
     try {
       const response = await fetchWithTimeout(pageCandidate, 'text/html,application/xhtml+xml');
-      if (!response.ok) continue;
+      if (!response.ok || !isSameOriginResponse(response, parsed.origin)) {
+        await response.body?.cancel?.().catch(() => {});
+        continue;
+      }
       const contentType = response.headers.get('content-type') ?? '';
-      if (contentType && !contentType.toLowerCase().includes('html')) continue;
-      const html = (await response.text()).slice(0, 150_000);
+      if (contentType && !contentType.toLowerCase().includes('html')) {
+        await response.body?.cancel?.().catch(() => {});
+        continue;
+      }
+      const html = (await response.text()).slice(0, MAX_HTML_BYTES);
       const iconUrls = extractSameOriginFaviconCandidates(html, response.url || pageCandidate);
       for (const iconUrl of iconUrls) {
         if (iconUrl === `${parsed.origin}/favicon.ico`) continue;
-        const dataUrl = await tryFetchIconDataUrl(iconUrl);
+        const dataUrl = await tryFetchIconDataUrl(iconUrl, parsed.origin);
         if (dataUrl) return dataUrl;
       }
     } catch {
@@ -250,20 +326,22 @@ async function writeCachedFavicon(origin: string, dataUrl: string): Promise<void
   const entry: CachedFaviconEntry = { dataUrl, cachedAt: Date.now() };
   memoryOriginCache.set(origin, entry);
 
-  try {
-    const current = (await faviconsItem.getValue()) ?? {};
-    const now = Date.now();
-    const pruned = Object.entries(current)
-      .filter(([key, val]) => key !== origin && val && now - val.cachedAt < FAVICON_CACHE_TTL_MS)
-      .sort((a, b) => b[1].cachedAt - a[1].cachedAt)
-      .slice(0, MAX_CACHED_FAVICONS - 1);
+  await serializeByKey(storageWriteQueues, 'favicons', async () => {
+    try {
+      const current = (await faviconsItem.getValue()) ?? {};
+      const now = Date.now();
+      const pruned = Object.entries(current)
+        .filter(([key, val]) => key !== origin && val && now - val.cachedAt < FAVICON_CACHE_TTL_MS)
+        .sort((a, b) => b[1].cachedAt - a[1].cachedAt)
+        .slice(0, MAX_CACHED_FAVICONS - 1);
 
-    const next: Record<string, CachedFaviconEntry> = Object.fromEntries(pruned);
-    next[origin] = entry;
-    await faviconsItem.setValue(next);
-  } catch {
-    // Best-effort cache write
-  }
+      const next: Record<string, CachedFaviconEntry> = Object.fromEntries(pruned);
+      next[origin] = entry;
+      await faviconsItem.setValue(next);
+    } catch {
+      // Best-effort cache write
+    }
+  });
 }
 
 /**

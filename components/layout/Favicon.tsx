@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Globe } from 'lucide-react';
-import { getCachedSiteFavicon, resolveSiteFavicon } from '@/lib/favicon';
+import {
+  getCachedSiteFavicon,
+  isSafeFaviconDataUrl,
+  resolveSiteFavicon,
+} from '@/lib/favicon';
 import type { ResolvedFaviconResult } from '@/lib/messaging';
 import { cn } from '@/lib/utils';
 
@@ -55,7 +59,11 @@ export function Favicon({ url, size = 14, className }: FaviconProps) {
 
   const active = resolved?.forUrl === url ? resolved : cached;
   const src =
-    validHttp && active && active.kind !== 'none' && active.src && failedSrc !== active.src
+    validHttp &&
+    active &&
+    active.kind === 'data' &&
+    isSafeFaviconDataUrl(active.src) &&
+    failedSrc !== active.src
       ? active.src
       : null;
 

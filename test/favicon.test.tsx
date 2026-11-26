@@ -3,11 +3,12 @@ import { JSDOM } from 'jsdom';
 import type { ReactElement } from 'react';
 import type { Root } from 'react-dom/client';
 import {
-  faviconUrl,
   resetFaviconCacheForTesting,
+  resolveSiteFavicon,
 } from '../lib/favicon';
 import {
   extractSameOriginFaviconCandidates,
+  faviconUrl,
   resetBackgroundFaviconCacheForTesting,
   resolveSiteFaviconInBackground,
 } from '../lib/faviconBackground';
@@ -142,6 +143,31 @@ section('3. Background resolution: Chrome cache, direct same-origin retrieval, c
         arrayBuffer: async () => PNG_1X1.buffer.slice(0),
       };
     }
+    if (url === 'https://redirect.example/favicon.ico') {
+      return {
+        ok: true,
+        url: 'https://other-origin.example/favicon.ico',
+        headers: new Headers({ 'content-type': 'image/png' }),
+        arrayBuffer: async () => PNG_1X1.buffer.slice(0),
+      };
+    }
+    if (url === 'https://soft404.example/favicon.ico') {
+      return {
+        ok: true,
+        url: 'https://soft404.example/favicon.ico',
+        headers: new Headers({ 'content-type': 'text/html; charset=utf-8' }),
+        arrayBuffer: async () => new TextEncoder().encode('<html>404</html>').buffer,
+      };
+    }
+    if (url === 'https://race-a.example/favicon.ico' || url === 'https://race-b.example/favicon.ico') {
+      await sleep(10);
+      return {
+        ok: true,
+        url,
+        headers: new Headers({ 'content-type': 'image/png' }),
+        arrayBuffer: async () => PNG_1X1.buffer.slice(0),
+      };
+    }
     return { ok: false, status: 404, headers: new Headers() };
   };
 
@@ -172,6 +198,24 @@ section('3. Background resolution: Chrome cache, direct same-origin retrieval, c
     const denied = await resolveSiteFaviconInBackground('https://revoked.example/item', 32);
     assert(denied.kind === 'none', 'does not fetch when origin permission is not granted');
     assert(directFetches === beforeDeniedFetches, 'denied origin triggers zero network fetches');
+
+    granted = true;
+    const redirected = await resolveSiteFaviconInBackground('https://redirect.example/page', 32);
+    assert(redirected.kind === 'none', 'rejects cross-origin redirect responses for favicons');
+
+    const soft404 = await resolveSiteFaviconInBackground('https://soft404.example/page', 32);
+    assert(soft404.kind === 'none', 'rejects text/html responses served from /favicon.ico');
+
+    await Promise.all([
+      resolveSiteFaviconInBackground('https://race-a.example/1', 32),
+      resolveSiteFaviconInBackground('https://race-b.example/1', 32),
+    ]);
+    const storedAfterConcurrent = await faviconsItem.getValue();
+    assert(
+      Boolean(storedAfterConcurrent?.['https://race-a.example']?.dataUrl) &&
+        Boolean(storedAfterConcurrent?.['https://race-b.example']?.dataUrl),
+      'serializes concurrent multi-origin cache writes without losing entries',
+    );
   } finally {
     globalThis.fetch = realFetch;
     if (hadPermissions) g.chrome.permissions = origPermissions;
@@ -190,6 +234,8 @@ section('4. Favicon component uses background resolution, shares origin cache, a
     queueMicrotask(() => {
       if (msg?.type === 'resolveFavicon' && String(msg?.data?.url).includes('fetched.example')) {
         cb({ res: { kind: 'data', src: 'data:image/png;base64,AAAA' } });
+      } else if (msg?.type === 'resolveFavicon' && String(msg?.data?.url).includes('unsafe-chrome.example')) {
+        cb({ res: { kind: 'data', src: 'chrome-extension://mock-id/_favicon/?pageUrl=https://unsafe-chrome.example&size=24' } });
       } else if (msg?.type === 'resolveFavicon' && String(msg?.data?.url).includes('none.example')) {
         cb({ res: { kind: 'none', src: null } });
       } else {
@@ -225,6 +271,17 @@ section('4. Favicon component uses background resolution, shares origin cache, a
       await sleep(30);
     });
     assert(container.querySelector('img') === null && !!container.querySelector('svg'), 'renders globe when no favicon is available');
+
+    const unsafeResult = await resolveSiteFavicon('https://unsafe-chrome.example/watch?v=1', 24);
+    assert(unsafeResult === null, 'client resolver rejects chrome-extension:// URLs');
+    await act(async () => {
+      root.render(<Favicon url="https://unsafe-chrome.example/watch?v=1" size={12} />);
+      await sleep(30);
+    });
+    assert(
+      container.querySelector('img') === null && !!container.querySelector('svg'),
+      'Favicon component never sets img src to a chrome-extension:// URL',
+    );
 
     await unmount(container, root);
   } finally {
