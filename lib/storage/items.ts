@@ -115,6 +115,17 @@ export const panelWidthItem = safeDefineItem<number>('local:panelWidth', {
   version: 1,
 });
 
+export interface CachedFaviconEntry {
+  dataUrl: string;
+  cachedAt: number;
+}
+
+/** Locally cached website favicons keyed by origin, used when Chrome's `_favicon/` cache has no entry for a monitored site. */
+export const faviconsItem = safeDefineItem<Record<string, CachedFaviconEntry>>('local:favicons', {
+  fallback: {},
+  version: 1,
+});
+
 /**
  * The window/tab id of the shared, minimized background window that
  * `liveTabStrategy` reuses for every live check instead of opening a

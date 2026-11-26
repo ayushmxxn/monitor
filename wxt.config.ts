@@ -128,14 +128,16 @@ export default defineConfig({
     // The panel (entrypoints/panel.content.tsx) is a content script
     // injected into the host page - image `src`s it renders resolve
     // as page-context requests, not extension ones, so any bundled
-    // image it references (the empty-state app icon, the settings
-    // footer's credit avatar) has to be explicitly exposed here or
-    // the browser blocks the load. Icons are used at multiple sizes
-    // across the panel/options/notifications, so the whole folder is
-    // listed rather than each size individually.
+    // image or Chrome `_favicon/` resource it references has to be
+    // explicitly exposed here or the browser blocks the load. Icons are
+    // used at multiple sizes across the panel/options/notifications, so
+    // the whole folder is listed rather than each size individually.
+    // Bundled fonts are loaded through the background worker instead of
+    // web_accessible_resources so content scripts never fetch
+    // `chrome-extension://` font URLs from a host page frame.
     web_accessible_resources: [
       {
-        resources: ['icon/*.png', 'fonts/*'],
+        resources: ['icon/*.png', '_favicon/*'],
         matches: ['<all_urls>'],
       },
     ],

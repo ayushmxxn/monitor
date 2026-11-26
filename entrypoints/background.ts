@@ -16,6 +16,8 @@ import {
   requestOriginPermission,
 } from "@/lib/permissions";
 import { getSettings } from "@/lib/storage";
+import { getBundledInterFontPayload } from "@/lib/ui/font";
+import { resolveSiteFaviconInBackground } from "@/lib/faviconBackground";
 
 const PANEL_SCRIPT_FILE = "/content-scripts/panel.js";
 
@@ -102,6 +104,12 @@ function registerMessageHandlers(): void {
   });
 
   onMessage("testWebhookDelivery", async ({ data }) => deliverTestAlert(data));
+
+  onMessage("getBundledFont", () => getBundledInterFontPayload());
+
+  onMessage("resolveFavicon", ({ data }) =>
+    resolveSiteFaviconInBackground(data.url, data.size),
+  );
 }
 
 /**

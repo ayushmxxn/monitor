@@ -6,7 +6,7 @@ Monitor is an open-source, local-first Chrome extension for tracking numbers on 
 
 - **No developer-side collection:** Monitor does not send your monitored URLs, extracted numbers, browsing history, or settings to the developer.
 - **Local-only persistence:** Monitors, check history, and settings are stored locally on your device using `chrome.storage.local` (never `chrome.storage.sync`).
-- **No external favicon lookups in the extension UI:** Site icons in the extension UI use Chrome's local `_favicon/` cache or fall back to a built-in generic icon.
+- **Local-only website favicons:** Site icons in the extension UI use Chrome's local `_favicon/` cache first, or fetch the website's own icon directly from the granted origin and cache it locally (never Google's favicon API or any third-party service), falling back to a built-in generic icon only as a last resort.
 - **Opt-in third-party alerts:** Discord, Telegram, and custom webhook integrations are off by default and only transmit data when you explicitly configure and enable them.
 
 ## Local Storage
@@ -19,6 +19,7 @@ Monitor stores the following data locally on your device:
 | `local:history:<monitorId>` | `chrome.storage.local` | Check history entries for each monitor: extracted value, previous value, semantic metadata, timestamp, change flag, diagnostic/error details, recovery confidence, and strategy used. |
 | `local:settings` | `chrome.storage.local` | Preferences (`defaultIntervalMinutes`, `theme`, `notificationsEnabled`, `soundEnabled`) and optional alert channel configuration (`webhookEnabled`, `webhookUrl`, `discordEnabled`, `discordWebhookUrl`, `telegramEnabled`, `telegramBotToken`, `telegramChatId`). |
 | `local:panelWidth` | `chrome.storage.local` | Resized width of the in-page panel. |
+| `local:favicons` | `chrome.storage.local` | Locally cached website favicons (data URLs keyed by origin, capped at 64 entries with a 7-day TTL) used when Chrome's `_favicon/` cache has no entry. |
 | `session:liveCheckWindow` | `chrome.storage.session` | Temporary window and tab IDs of the minimized background window used while a live-tab check is running. Cleared when the check finishes or when the browser restarts. |
 | `monitor:sound` | `localStorage` | UI audio toggle state (`on` or `off`) for synthesized Web Audio interaction sounds. |
 

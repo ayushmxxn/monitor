@@ -136,7 +136,7 @@ Every check produces a `DiagnosticCode` (`OK`, `OK_RECOVERED`, `PERMISSION_DENIE
 ## Permissions and UI Isolation
 
 - **Permissions:** `wxt.config.ts` declares `optional_host_permissions: ['*://*/*']` and zero upfront `host_permissions`. Both `panel.content.tsx` and `pageAgent.content.ts` use `registration: 'runtime'` with no `matches` array. Clicking the toolbar icon triggers `requestOriginPermission(tab.url)` inside the user gesture and injects or toggles the panel.
-- **Shadow-DOM Panel:** `panel.content.tsx` mounts inside a `closed` shadow root (`mode: 'closed'`), promotes the host to the browser top layer via the Popover API (`popover="manual"`), inlines compiled Tailwind CSS (`?inline`, rewriting `:root` to `:host`), and loads bundled `InterVariable.woff2` via `fetch(browser.runtime.getURL(...))` + `new FontFace(name, arrayBuffer)` for immunity against strict host-page CSPs.
+- **Shadow-DOM Panel:** `panel.content.tsx` mounts inside a `closed` shadow root (`mode: 'closed'`), promotes the host to the browser top layer via the Popover API (`popover="manual"`), inlines compiled Tailwind CSS (`?inline`, rewriting `:root` to `:host`), and loads bundled `InterVariable.woff2` through the background service worker (`getBundledFont` message) before registering it via `new FontFace(name, arrayBuffer)` for immunity against strict host-page CSPs and frame-origin URL restrictions.
 
 ## Storage and Retention
 
@@ -146,6 +146,7 @@ All persistent state uses `chrome.storage.local` (never `chrome.storage.sync`) t
 - `local:history:<monitorId>` (v2): Retained for 30 days (`HISTORY_RETENTION_MS`) and capped at 1,000 entries (`MAX_HISTORY_ENTRIES`), with unchanged readings sampled hourly (`UNCHANGED_SAMPLE_INTERVAL_MS`).
 - `local:settings` (v6): Interval, theme, notification/sound toggles, and optional Discord/Telegram/webhook settings.
 - `local:panelWidth` (v1): Saved panel width.
+- `local:favicons` (v1): Origin-keyed favicon cache (7-day TTL, max 64 entries) when Chrome's `_favicon/` cache has no entry.
 - `session:liveCheckWindow`: Ephemeral background check window handle.
 
 Writes in `lib/monitors/store.ts` are serialized per key via `serializeByKey` to prevent lost-update races across concurrent checks.

@@ -6,9 +6,11 @@ import type { ProtocolMap } from './protocol';
 export type {
   ProtocolMap,
   AppInfo,
+  BundledFontPayload,
   ExtensionInstallType,
   ParseHtmlInput,
   ParseHtmlResult,
+  ResolvedFaviconResult,
 } from './protocol';
 export type { Diagnostic, DiagnosticCode } from '@/lib/monitors/diagnostics';
 

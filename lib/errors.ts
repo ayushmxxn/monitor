@@ -38,7 +38,14 @@ const CONTEXT_INVALIDATED_PATTERNS = [
 
 /** True when `error` is one of Chrome's stale-extension-context failures (see `CONTEXT_INVALIDATED_PATTERNS`). */
 export function isExtensionContextInvalidated(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : error && typeof error === 'object' && typeof (error as { message?: unknown }).message === 'string'
+          ? (error as { message: string }).message
+          : '';
   const lower = message.toLowerCase();
   return CONTEXT_INVALIDATED_PATTERNS.some((pattern) => lower.includes(pattern));
 }

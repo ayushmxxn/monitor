@@ -100,6 +100,30 @@ export interface ProtocolMap {
    * Plays a Cuelume interaction sound cue in the active tab / panel.
    */
   playCue(input: { cue: "sparkle" | "error"; volume: number }): void;
+
+  /**
+   * Loads the bundled Inter Variable font bytes from the background
+   * service worker so injected content scripts never fetch
+   * `chrome-extension://` font URLs from a host page frame.
+   */
+  getBundledFont(): BundledFontPayload;
+
+  /**
+   * Resolves a site's favicon via Chrome's local `_favicon/` cache or,
+   * when uncached, by fetching the site's own icon directly in the
+   * background worker (only for granted origins) and caching it locally.
+   */
+  resolveFavicon(input: { url: string; size?: number }): ResolvedFaviconResult;
+}
+
+export interface BundledFontPayload {
+  base64: string;
+  mimeType: "font/woff2";
+}
+
+export interface ResolvedFaviconResult {
+  kind: "chrome" | "data" | "none";
+  src: string | null;
 }
 
 export interface ParseHtmlInput {
