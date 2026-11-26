@@ -16,7 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - History timeline charts, historical benchmarks (low/high/average), 30-day / 1,000-entry local retention, and smart alert conditions (`any`, `increase`, `decrease`, `below`, `above`, `matches`).
 - Local desktop notifications, optional Web Audio cues, and opt-in Discord, Telegram, and custom webhook alert channels.
 - Incremental per-origin host permissions (`optional_host_permissions`) with a Settings site-access recovery section.
-- Open-source launch documentation (`LICENSE`, `PRIVACY.md`, `SECURITY.md`, `CONTRIBUTING.md`, `docs/architecture.md`), isolated full-suite test runner (`scripts/run-tests.ts`), and GitHub Actions CI workflow.
+- Open-source launch documentation (`LICENSE`, `PRIVACY.md`, `SECURITY.md`, `CONTRIBUTING.md`, `docs/architecture.md`) and isolated full-suite test runner (`scripts/run-tests.ts`).
 
 ### Changed
 
