@@ -17,28 +17,3 @@ export function faviconUrl(pageUrl: string, size = 32): string {
   url.searchParams.set('size', String(size));
   return url.toString();
 }
-
-/**
- * Second-choice favicon source, tried only if `faviconUrl` above fails
- * to load (see `components/layout/Favicon.tsx`). Chrome's local
- * favicon cache only has an entry once the browser itself has loaded
- * that exact page in a tab; a public lookup by domain covers monitors
- * saved from pages the cache doesn't have (or a favicon that changed
- * since it was last cached). Not attempted first because it's a real
- * network request, whereas the local cache is instant and works
- * offline - and being a plain cross-origin `<img>` request, a page
- * with a strict `img-src` CSP can still block it, which is exactly
- * the case this falls further back to a generic icon for.
- */
-export function fallbackFaviconUrl(pageUrl: string, size = 32): string | null {
-  let hostname: string;
-  try {
-    hostname = new URL(pageUrl).hostname;
-  } catch {
-    return null;
-  }
-  const url = new URL('https://www.google.com/s2/favicons');
-  url.searchParams.set('domain', hostname);
-  url.searchParams.set('sz', String(size));
-  return url.toString();
-}

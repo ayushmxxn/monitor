@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Globe } from 'lucide-react';
-import { faviconUrl, fallbackFaviconUrl } from '@/lib/favicon';
+import { faviconUrl } from '@/lib/favicon';
 import { cn } from '@/lib/utils';
 
 interface FaviconProps {
@@ -11,29 +11,26 @@ interface FaviconProps {
 
 /**
  * A site's favicon, sized for inline use next to a monitor's name.
- * Tries Chrome's local favicon cache first (instant, works offline),
- * then a public favicon lookup by domain (covers pages the local
- * cache has no entry for), and only falls back to a generic globe
- * glyph if both fail - a new site, a `file://` page, or a host page
- * whose CSP blocks the second request.
+ * Uses Chrome's local favicon cache (instant, offline, zero network
+ * requests) and falls back directly to a generic globe glyph if the
+ * cache has no entry or cannot load it.
  */
 export function Favicon({ url, size = 14, className }: FaviconProps) {
-  const [source, setSource] = useState<'primary' | 'fallback' | 'failed'>('primary');
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const failed = failedUrl === url;
 
-  if (source === 'failed') {
-    return (
-      <Globe
-        className={cn('shrink-0 text-muted-foreground', className)}
-        style={{ width: size, height: size }}
-        aria-hidden
-      />
-    );
+  let src: string | null = null;
+  if (!failed) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        src = faviconUrl(url, size * 2);
+      }
+    } catch {
+      src = null;
+    }
   }
 
-  const src =
-    source === 'primary' ? faviconUrl(url, size * 2) : fallbackFaviconUrl(url, size * 2);
-
-  // No parseable domain to fall back to - straight to the glyph.
   if (!src) {
     return (
       <Globe
@@ -46,14 +43,14 @@ export function Favicon({ url, size = 14, className }: FaviconProps) {
 
   return (
     <img
-      key={`${url}-${source}`}
+      key={url}
       src={src}
       alt=""
       width={size}
       height={size}
       className={cn('shrink-0 rounded-[3px] object-contain', className)}
       style={{ width: size, height: size }}
-      onError={() => setSource((current) => (current === 'primary' ? 'fallback' : 'failed'))}
+      onError={() => setFailedUrl(url)}
     />
   );
 }

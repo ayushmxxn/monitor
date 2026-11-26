@@ -212,7 +212,7 @@ section('M7: site access section grants per-origin access');
       'granted origin leaves the list after refresh',
     );
     assert(
-      (container.textContent ?? '').includes('can access'),
+      (container.textContent ?? '').includes('All active (2)'),
       'section confirms access once nothing is revoked',
     );
     await unmount(container, root);
@@ -250,7 +250,7 @@ section('M7: site access section grants per-origin access');
   try {
     const { container, root } = await render(<SiteAccessSection />);
     assert(
-      (container.textContent ?? '').includes('can access'),
+      (container.textContent ?? '').includes('All active (1)'),
       'all-granted state confirms access with no action needed',
     );
     assert(

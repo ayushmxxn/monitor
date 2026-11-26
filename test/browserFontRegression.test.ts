@@ -10,7 +10,7 @@
  * strict CSP pages, and a static landing page.
  */
 import { spawn, type ChildProcess } from 'child_process';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import postcss from 'postcss';
 // @ts-expect-error - untyped config
 import config from '../postcss.config.js';
@@ -40,20 +40,48 @@ const panelCss = rawCompiled.replaceAll(':root', ':host');
 const fontBinaryBase64 = readFileSync('./public/fonts/InterVariable.woff2').toString('base64');
 
 const PORT = 9350;
-const chromeExecutable = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+
+function resolveChromeExecutable(): string {
+  const candidates = [
+    process.env.CHROME_PATH,
+    ...(process.platform === 'win32'
+      ? [
+          'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+          'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        ]
+      : process.platform === 'darwin'
+        ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+        : [
+            '/usr/bin/google-chrome',
+            '/usr/bin/google-chrome-stable',
+            '/usr/bin/chromium',
+            '/usr/bin/chromium-browser',
+          ]),
+  ].filter((p): p is string => Boolean(p));
+
+  const found = candidates.find((p) => existsSync(p));
+  if (!found) {
+    throw new Error(`No Chrome executable found. Checked: ${candidates.join(', ')}`);
+  }
+  return found;
+}
+
+const chromeExecutable = resolveChromeExecutable();
+const chromeArgs = [
+  '--headless=new',
+  `--remote-debugging-port=${PORT}`,
+  '--disable-gpu',
+  '--no-first-run',
+  '--disable-background-networking',
+  ...(process.platform === 'linux' && process.env.CI ? ['--no-sandbox'] : []),
+  'about:blank',
+];
 
 let chromeProcess: ChildProcess | null = null;
 let ws: WebSocket | null = null;
 
 try {
-  chromeProcess = spawn(chromeExecutable, [
-    '--headless=new',
-    `--remote-debugging-port=${PORT}`,
-    '--disable-gpu',
-    '--no-first-run',
-    '--disable-background-networking',
-    'about:blank',
-  ]);
+  chromeProcess = spawn(chromeExecutable, chromeArgs);
 
   // Wait for Chrome to bind port
   let connected = false;

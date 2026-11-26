@@ -13,9 +13,7 @@ export const MESSAGE_TIMEOUT_MS = 5_000;
 /** External feedback form, linked from Settings. */
 export const FEEDBACK_URL = 'https://tally.so/r/0Qq7GN';
 
-/** Creator credit, shown in the settings footer. */
-export const CREATOR_HANDLE = '@ayushmxxn';
-export const CREATOR_PORTFOLIO_URL = 'https://ayushmxxn.com/';
+/** Creator social links, shown in the settings footer. */
 export const CREATOR_TWITTER_URL = 'https://x.com/ayushmxxn';
 /** Creator Discord server, linked from the settings footer social row. */
 export const CREATOR_DISCORD_URL = 'https://discord.com/invite/kzk6uWey3g';

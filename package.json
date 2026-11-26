@@ -1,6 +1,7 @@
 {
   "name": "monitor-ext",
-  "description": "Local-first Chrome extension for monitoring any value on any website",
+  "description": "Local-first Chrome extension for tracking numbers on websites",
+  "license": "MIT",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -10,7 +11,7 @@
     "zip": "wxt zip",
     "compile": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test": "bun test/safetyNet.test.ts && bun test/pipeline.test.ts && bun test/historyChart.test.ts && bun test/adaptiveFormat.test.ts && bun test/numberPopIn.test.tsx && bun test/confettiBurst.test.tsx && bun test/checkStage.test.tsx && bun test/fontIsolation.test.ts && bun test/browserFontRegression.test.ts && bun test/cuelumeSparkle.test.ts && bun test/accessChange.test.ts && bun test/monitorOrder.test.ts && bun test/soundSetting.test.ts && bun test/errorMessages.test.tsx && bun test/refreshAll.test.tsx && bun test/socialLinks.test.tsx && bun test/zeroGuard.test.ts && bun test/zeroFirstCheck.test.ts && bun test/localeNumbers.test.ts",
+    "test": "bun scripts/run-tests.ts",
     "test:safety": "bun test/safetyNet.test.ts",
     "test:chart": "bun test/historyChart.test.ts",
     "test:browser-font": "bun test/browserFontRegression.test.ts",
